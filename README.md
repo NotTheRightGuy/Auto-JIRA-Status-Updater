@@ -14,7 +14,7 @@ An automated tool that synchronizes JIRA issue statuses based on Git branch and 
 The tool updates JIRA issues according to the following rules:
 
 1. **No branch exists**: Keep current status
-2. **Branch exists + PR merged**: Set status to "Done"
+2. **Branch exists + PR merged**: Set status to "Dev Testing"
 3. **Branch exists + PR open**: Set status to "In Review"
 4. **Branch exists + No PR**: Set status to "In Progress"
 
