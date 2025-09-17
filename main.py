@@ -10,8 +10,13 @@ from dotenv import load_dotenv
 from utils.jira import JIRA
 from utils.bitbucket import Bitbucket
 from logs.logger import logger
-from utils.helper import process_issue
+from utils.helper import (
+    process_issue,
+    parse_time_string,
+    get_next_scheduled_run,
+)
 from utils.database import DatabaseManager, TicketSnapshot
+
 
 load_dotenv()
 
@@ -29,65 +34,6 @@ def load_config():
     except json.JSONDecodeError as e:
         logger.error(f"Error parsing config.json: {e}")
         raise
-
-
-def parse_time_string(time_str: str) -> time:
-    """Parse time string in format HHMM to time object.
-
-    Args:
-        time_str: Time in format like '1000' for 10:00 AM or '1310' for 1:10 PM
-
-    Returns:
-        datetime.time object
-    """
-    if len(time_str) == 3:  # e.g., '900' for 9:00 AM
-        time_str = "0" + time_str
-    elif len(time_str) != 4:
-        raise ValueError(f"Invalid time format: {time_str}. Expected HHMM format.")
-
-    hour = int(time_str[:2])
-    minute = int(time_str[2:])
-
-    if hour > 23 or minute > 59:
-        raise ValueError(f"Invalid time: {hour}:{minute:02d}")
-
-    return time(hour, minute)
-
-
-def get_next_scheduled_run(run_times: List[str]) -> datetime:
-    """Get the next scheduled run time based on config.
-
-    Args:
-        run_times: List of time strings from config.json
-
-    Returns:
-        Next datetime when the script should run
-    """
-    now = datetime.now()
-    today_times = []
-
-    for time_str in run_times:
-        try:
-            parsed_time = parse_time_string(time_str)
-            today_datetime = datetime.combine(now.date(), parsed_time)
-
-            if today_datetime > now:
-                today_times.append(today_datetime)
-        except ValueError as e:
-            logger.error(f"Invalid time in config: {time_str} - {e}")
-            continue
-
-    if today_times:
-        return min(today_times)
-    else:
-        # All times for today have passed, get earliest time tomorrow
-        tomorrow = now.date() + timedelta(days=1)
-        try:
-            earliest_time = min([parse_time_string(t) for t in run_times])
-            return datetime.combine(tomorrow, earliest_time)
-        except ValueError:
-            # If all times are invalid, default to next hour
-            return now + timedelta(hours=1)
 
 
 # Load config at startup
@@ -136,36 +82,86 @@ class DiscordLogHandler(logging.Handler):
             # Combine logs into chunks (Discord message limit is 2000 chars)
             log_text = "\n".join(self.log_buffer)
 
+            # Calculate maximum chunk size accounting for formatting overhead
+            header_single = "📊 JIRA Status Updater Log\n" + "-" * 50 + "\n"
+            header_multi = (
+                "📊 JIRA Status Updater Log (Part {}/{}) \n" + "-" * 50 + "\n"
+            )
+            code_block_overhead = 8  # ``` at start and end
+            max_content_size = (
+                2000 - len(header_single) - code_block_overhead - 50
+            )  # Extra safety margin
+
             # Split into chunks if too long
             chunks = []
-            if len(log_text) <= 1900:  # Leave some room for code block formatting
+            if len(log_text) <= max_content_size:
                 chunks.append(log_text)
             else:
-                # Split into smaller chunks
+                # Split into smaller chunks by lines
                 lines = self.log_buffer
                 current_chunk = ""
 
                 for line in lines:
-                    if len(current_chunk) + len(line) + 1 <= 1900:
-                        current_chunk += line + "\n"
+                    # Check if adding this line would exceed the limit
+                    test_chunk = (
+                        current_chunk + line + "\n" if current_chunk else line + "\n"
+                    )
+                    if len(test_chunk) <= max_content_size:
+                        current_chunk = test_chunk
                     else:
+                        # If current chunk has content, save it and start new chunk
                         if current_chunk:
                             chunks.append(current_chunk.strip())
-                        current_chunk = line + "\n"
+                            current_chunk = line + "\n"
+                        else:
+                            # Single line is too long, truncate it
+                            truncated_line = (
+                                line[: max_content_size - 50] + "... [TRUNCATED]"
+                            )
+                            chunks.append(truncated_line)
+                            current_chunk = ""
 
+                # Add the last chunk if it has content
                 if current_chunk:
                     chunks.append(current_chunk.strip())
 
-            # Send each chunk
+            # Send each chunk with length validation
             for i, chunk in enumerate(chunks):
-                if len(chunks) > 1:
-                    await channel.send(
-                        f"```\n📊 JIRA Status Updater Log (Part {i+1}/{len(chunks)})\n{'-'*50}\n{chunk}\n```"
-                    )
-                else:
-                    await channel.send(
-                        f"```\n📊 JIRA Status Updater Log\n{'-'*50}\n{chunk}\n```"
-                    )
+                try:
+                    if len(chunks) > 1:
+                        message = f"```\n📊 JIRA Status Updater Log (Part {i+1}/{len(chunks)})\n{'-'*50}\n{chunk}\n```"
+                    else:
+                        message = (
+                            f"```\n📊 JIRA Status Updater Log\n{'-'*50}\n{chunk}\n```"
+                        )
+
+                    # Final safety check
+                    if len(message) > 2000:
+                        logger.error(
+                            f"Message still too long ({len(message)} chars), truncating"
+                        )
+                        # Emergency truncation
+                        available_space = (
+                            2000
+                            - len(f"```\n📊 JIRA Status Updater Log\n{'-'*50}\n\n```")
+                            - 50
+                        )
+                        truncated_chunk = (
+                            chunk[:available_space] + "... [TRUNCATED DUE TO LENGTH]"
+                        )
+                        message = f"```\n📊 JIRA Status Updater Log\n{'-'*50}\n{truncated_chunk}\n```"
+
+                    await channel.send(message)
+
+                except discord.HTTPException as e:
+                    logger.error(f"Discord API error sending log chunk {i+1}: {e}")
+                    # Try sending a simplified error message
+                    try:
+                        await channel.send(
+                            f"❌ Error sending log chunk {i+1}/{len(chunks)}: Message too long ({len(message) if 'message' in locals() else 'unknown'} chars)"
+                        )
+                    except Exception:
+                        pass  # If even the error message fails, give up
 
             # Clear buffer after sending
             self.log_buffer.clear()
@@ -358,7 +354,9 @@ class JIRAStatusWorker:
             issues_processed = 0
             issues_updated = 0
             worker_changes = []  # Track changes for watch channel alerts
-            status_changes = []  # Track all status changes for status channel notifications
+            status_changes = (
+                []
+            )  # Track all status changes for status channel notifications
 
             for issue in open_issues:
                 try:
@@ -388,13 +386,15 @@ class JIRAStatusWorker:
                         issues_updated += 1
 
                         # Add to status changes for general notification
-                        status_changes.append({
-                            "ticket_id": issue.key,
-                            "old_status": original_status,
-                            "new_status": new_status,
-                            "url": f"{jira.host}/browse/{issue.key}",
-                            "type": "issue"
-                        })
+                        status_changes.append(
+                            {
+                                "ticket_id": issue.key,
+                                "old_status": original_status,
+                                "new_status": new_status,
+                                "url": f"{jira.host}/browse/{issue.key}",
+                                "type": "issue",
+                            }
+                        )
 
                         # Check if this ticket is being watched for watch channel alerts
                         watchers = self.db_manager.get_watchers_for_ticket(issue.key)
@@ -457,13 +457,15 @@ class JIRAStatusWorker:
                         bugs_updated += 1
 
                         # Add to status changes for general notification
-                        status_changes.append({
-                            "ticket_id": bug.key,
-                            "old_status": original_status,
-                            "new_status": new_status,
-                            "url": f"{jira.host}/browse/{bug.key}",
-                            "type": "bug"
-                        })
+                        status_changes.append(
+                            {
+                                "ticket_id": bug.key,
+                                "old_status": original_status,
+                                "new_status": new_status,
+                                "url": f"{jira.host}/browse/{bug.key}",
+                                "type": "bug",
+                            }
+                        )
 
                         # Check if this ticket is being watched for watch channel alerts
                         watchers = self.db_manager.get_watchers_for_ticket(bug.key)
@@ -732,8 +734,12 @@ class JIRAStatusWorker:
                 return
 
             # Group changes by type (issues vs bugs)
-            issues_changed = [change for change in status_changes if change.get("type") == "issue"]
-            bugs_changed = [change for change in status_changes if change.get("type") == "bug"]
+            issues_changed = [
+                change for change in status_changes if change.get("type") == "issue"
+            ]
+            bugs_changed = [
+                change for change in status_changes if change.get("type") == "bug"
+            ]
 
             # Create summary embed
             embed = discord.Embed(
@@ -744,16 +750,29 @@ class JIRAStatusWorker:
 
             if issues_changed:
                 issues_text = []
-                for change in issues_changed[:10]:  # Limit to 10 to avoid message length issues
+                max_field_length = 1000  # Leave some margin below Discord's 1024 limit
+                current_length = 0
+                items_shown = 0
+
+                for change in issues_changed:
                     ticket_id = change["ticket_id"]
                     old_status = change["old_status"]
                     new_status = change["new_status"]
                     url = change["url"]
-                    issues_text.append(f"• [{ticket_id}]({url}): {old_status} → {new_status}")
-                
-                if len(issues_changed) > 10:
-                    issues_text.append(f"... and {len(issues_changed) - 10} more issues")
-                
+                    line = f"• [{ticket_id}]({url}): {old_status} → {new_status}"
+
+                    # Check if adding this line would exceed the limit
+                    if current_length + len(line) + 1 > max_field_length:
+                        break
+
+                    issues_text.append(line)
+                    current_length += len(line) + 1  # +1 for newline
+                    items_shown += 1
+
+                if items_shown < len(issues_changed):
+                    remaining = len(issues_changed) - items_shown
+                    issues_text.append(f"... and {remaining} more issues")
+
                 embed.add_field(
                     name=f"📋 Issues Updated ({len(issues_changed)}):",
                     value="\n".join(issues_text),
@@ -762,16 +781,29 @@ class JIRAStatusWorker:
 
             if bugs_changed:
                 bugs_text = []
-                for change in bugs_changed[:10]:  # Limit to 10 to avoid message length issues
+                max_field_length = 1000  # Leave some margin below Discord's 1024 limit
+                current_length = 0
+                items_shown = 0
+
+                for change in bugs_changed:
                     ticket_id = change["ticket_id"]
                     old_status = change["old_status"]
                     new_status = change["new_status"]
                     url = change["url"]
-                    bugs_text.append(f"• [{ticket_id}]({url}): {old_status} → {new_status}")
-                
-                if len(bugs_changed) > 10:
-                    bugs_text.append(f"... and {len(bugs_changed) - 10} more bugs")
-                
+                    line = f"• [{ticket_id}]({url}): {old_status} → {new_status}"
+
+                    # Check if adding this line would exceed the limit
+                    if current_length + len(line) + 1 > max_field_length:
+                        break
+
+                    bugs_text.append(line)
+                    current_length += len(line) + 1  # +1 for newline
+                    items_shown += 1
+
+                if items_shown < len(bugs_changed):
+                    remaining = len(bugs_changed) - items_shown
+                    bugs_text.append(f"... and {remaining} more bugs")
+
                 embed.add_field(
                     name=f"🐛 Bugs Updated ({len(bugs_changed)}):",
                     value="\n".join(bugs_text),
@@ -796,9 +828,36 @@ class JIRAStatusWorker:
 
             try:
                 await status_channel.send(embed=embed)
-                logger.info(f"Sent status change notification for {total_changes} tickets to status channel")
+                logger.info(
+                    f"Sent status change notification for {total_changes} tickets to status channel"
+                )
+            except discord.HTTPException as e:
+                if "Invalid Form Body" in str(e) or "Must be" in str(e):
+                    logger.error(
+                        f"Discord embed too long, sending simplified message: {e}"
+                    )
+                    # Send a simplified text message instead
+                    try:
+                        simple_message = (
+                            f"🔄 **JIRA Status Update Summary**\n"
+                            f"📊 Total tickets updated: {total_changes}\n"
+                            f"📋 Issues: {len(issues_changed)} | 🐛 Bugs: {len(bugs_changed)}\n"
+                            f"🤖 Updates triggered by Git activity detection"
+                        )
+                        await status_channel.send(simple_message)
+                        logger.info(
+                            f"Sent simplified status notification for {total_changes} tickets"
+                        )
+                    except Exception as fallback_error:
+                        logger.error(
+                            f"Failed to send even simplified notification: {fallback_error}"
+                        )
+                else:
+                    logger.error(f"Discord API error sending status notification: {e}")
             except discord.Forbidden:
-                logger.error(f"No permission to send messages to status channel {status_channel_id}")
+                logger.error(
+                    f"No permission to send messages to status channel {status_channel_id}"
+                )
             except Exception as e:
                 logger.error(f"Error sending status change notification: {e}")
 
@@ -941,14 +1000,24 @@ class JIRAStatusWorker:
                     # Check if we're within 1 minute of alert time and haven't sent daily alerts today
                     alert_time_diff = abs((now - today_alert_time).total_seconds())
                     should_send_daily_alerts = (
-                        alert_time_diff <= 60 and
-                        startup_alerts_sent and  # Only send daily alerts after startup alerts
-                        (not hasattr(self, "last_alert_sent") or 
-                         self.last_alert_sent is None or 
-                         self.last_alert_sent.date() < now.date() or
-                         # Allow daily alert if startup was today but it's now the configured alert time
-                         (self.last_alert_sent.date() == now.date() and 
-                          abs((self.last_alert_sent - today_alert_time).total_seconds()) > 300))
+                        alert_time_diff <= 60
+                        and startup_alerts_sent  # Only send daily alerts after startup alerts
+                        and (
+                            not hasattr(self, "last_alert_sent")
+                            or self.last_alert_sent is None
+                            or self.last_alert_sent.date() < now.date()
+                            or
+                            # Allow daily alert if startup was today but it's now the configured alert time
+                            (
+                                self.last_alert_sent.date() == now.date()
+                                and abs(
+                                    (
+                                        self.last_alert_sent - today_alert_time
+                                    ).total_seconds()
+                                )
+                                > 300
+                            )
+                        )
                     )
 
                     if should_send_daily_alerts:
@@ -1111,13 +1180,35 @@ async def send_watch_channel_alerts(ticket_notifications):
                 timestamp=datetime.now(timezone.utc),
             )
 
-            changes_text = "\n".join([f"• {change}" for change in changes])
+            # Create changes text with length limit
+            max_changes_length = 900  # Leave room for other fields
+            changes_text_list = [f"• {change}" for change in changes]
+            changes_text = "\n".join(changes_text_list)
+
+            if len(changes_text) > max_changes_length:
+                # Truncate changes if too long
+                truncated_changes = []
+                current_length = 0
+                for change in changes_text_list:
+                    if (
+                        current_length + len(change) + 1 > max_changes_length - 30
+                    ):  # Leave room for truncation message
+                        truncated_changes.append("... (additional changes truncated)")
+                        break
+                    truncated_changes.append(change)
+                    current_length += len(change) + 1
+                changes_text = "\n".join(truncated_changes)
+
             embed.add_field(
                 name="📋 Changes Detected:", value=changes_text, inline=False
             )
 
-            # Add watcher info
+            # Add watcher info with length limit
             watcher_list = ", ".join([f"{user.display_name}" for user in users])
+            if len(watcher_list) > 900:
+                # Truncate watcher list if too long
+                watcher_list = watcher_list[:900] + "... (truncated)"
+
             embed.add_field(
                 name=f"👥 Watching Users ({len(users)}):",
                 value=watcher_list,
@@ -1134,6 +1225,35 @@ async def send_watch_channel_alerts(ticket_notifications):
                 bot_logger.info(
                     f"Sent watch channel alert for {ticket_id} to {len(users)} users"
                 )
+            except discord.HTTPException as e:
+                if "Invalid Form Body" in str(e) or "Must be" in str(e):
+                    bot_logger.error(
+                        f"Discord embed too long for watch alert, sending simplified message: {e}"
+                    )
+                    # Send a simplified text message instead
+                    try:
+                        simple_message = (
+                            f"🔔 **Ticket Status Changed!** {user_mentions}\n"
+                            f"🚨 **{ticket_id}** has been updated\n"
+                            f"📋 {len(changes)} change(s) detected\n"
+                            f"🔗 [View Ticket]({url})\n"
+                            f"👥 {len(users)} user(s) watching"
+                        )
+                        # Check if simplified message is still too long
+                        if len(simple_message) > 2000:
+                            simple_message = (
+                                f"🔔 **Ticket {ticket_id} Updated!**\n"
+                                f"📋 {len(changes)} change(s) detected\n"
+                                f"👥 {len(users)} watcher(s) notified"
+                            )
+                        await watch_channel.send(simple_message)
+                        bot_logger.info(f"Sent simplified watch alert for {ticket_id}")
+                    except Exception as fallback_error:
+                        bot_logger.error(
+                            f"Failed to send even simplified watch alert: {fallback_error}"
+                        )
+                else:
+                    bot_logger.error(f"Discord API error sending watch alert: {e}")
             except discord.Forbidden:
                 bot_logger.error(
                     f"No permission to send messages to watch channel {watch_channel_id}"
@@ -1194,6 +1314,9 @@ async def send_due_date_alerts(due_tasks_by_user, user_config):
             # Add today's tasks
             if today_tasks:
                 today_text = []
+                max_field_length = 1000
+                current_length = 0
+
                 for task in today_tasks:
                     priority = (
                         getattr(task.fields.priority, "name", "None")
@@ -1201,20 +1324,28 @@ async def send_due_date_alerts(due_tasks_by_user, user_config):
                         else "None"
                     )
                     task_url = f"{os.getenv('ATLASSIAN_URL')}browse/{task.key}"
-                    today_text.append(
-                        f"• [{task.key}]({task_url}) - {task.fields.summary[:60]}{'...' if len(task.fields.summary) > 60 else ''} (Priority: {priority})"
-                    )
+                    line = f"• [{task.key}]({task_url}) - {task.fields.summary[:60]}{'...' if len(task.fields.summary) > 60 else ''} (Priority: {priority})"
+
+                    # Check if adding this line would exceed the limit
+                    if current_length + len(line) + 1 > max_field_length:
+                        today_text.append("... (truncated due to length)")
+                        break
+
+                    today_text.append(line)
+                    current_length += len(line) + 1
 
                 embed.add_field(
                     name=f"🚨 Due TODAY ({len(today_tasks)} task{'s' if len(today_tasks) != 1 else ''}):",
-                    value="\n".join(today_text[:5])
-                    + ("\n..." if len(today_text) > 5 else ""),
+                    value="\n".join(today_text),
                     inline=False,
                 )
 
             # Add tomorrow's tasks
             if tomorrow_tasks:
                 tomorrow_text = []
+                max_field_length = 1000
+                current_length = 0
+
                 for task in tomorrow_tasks:
                     priority = (
                         getattr(task.fields.priority, "name", "None")
@@ -1222,14 +1353,19 @@ async def send_due_date_alerts(due_tasks_by_user, user_config):
                         else "None"
                     )
                     task_url = f"{os.getenv('ATLASSIAN_URL')}browse/{task.key}"
-                    tomorrow_text.append(
-                        f"• [{task.key}]({task_url}) - {task.fields.summary[:60]}{'...' if len(task.fields.summary) > 60 else ''} (Priority: {priority})"
-                    )
+                    line = f"• [{task.key}]({task_url}) - {task.fields.summary[:60]}{'...' if len(task.fields.summary) > 60 else ''} (Priority: {priority})"
+
+                    # Check if adding this line would exceed the limit
+                    if current_length + len(line) + 1 > max_field_length:
+                        tomorrow_text.append("... (truncated due to length)")
+                        break
+
+                    tomorrow_text.append(line)
+                    current_length += len(line) + 1
 
                 embed.add_field(
                     name=f"⚠️ Due TOMORROW ({len(tomorrow_tasks)} task{'s' if len(tomorrow_tasks) != 1 else ''}):",
-                    value="\n".join(tomorrow_text[:5])
-                    + ("\n..." if len(tomorrow_text) > 5 else ""),
+                    value="\n".join(tomorrow_text),
                     inline=False,
                 )
 
@@ -1246,6 +1382,29 @@ async def send_due_date_alerts(due_tasks_by_user, user_config):
                 bot_logger.info(
                     f"Sent due date alert for {user_name} ({len(today_tasks)} today, {len(tomorrow_tasks)} tomorrow)"
                 )
+            except discord.HTTPException as e:
+                if "Invalid Form Body" in str(e) or "Must be" in str(e):
+                    bot_logger.error(
+                        f"Discord embed too long for due date alert, sending simplified message: {e}"
+                    )
+                    # Send a simplified text message instead
+                    try:
+                        simple_message = (
+                            f"📅 **Due Date Alert for {user_name}**\n"
+                            f"🚨 Tasks due TODAY: {len(today_tasks)}\n"
+                            f"⚠️ Tasks due TOMORROW: {len(tomorrow_tasks)}\n"
+                            f"💡 Check JIRA for details and plan your day accordingly!"
+                        )
+                        await alerts_channel.send(simple_message)
+                        bot_logger.info(
+                            f"Sent simplified due date alert for {user_name}"
+                        )
+                    except Exception as fallback_error:
+                        bot_logger.error(
+                            f"Failed to send even simplified due date alert: {fallback_error}"
+                        )
+                else:
+                    bot_logger.error(f"Discord API error sending due date alert: {e}")
             except discord.Forbidden:
                 bot_logger.error(
                     f"No permission to send messages to alerts channel {alerts_channel_id}"

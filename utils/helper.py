@@ -2,6 +2,7 @@ from typing import Optional, List
 from logs.logger import logger
 from utils.jira import JIRA
 from utils.bitbucket import Bitbucket
+from datetime import datetime, timedelta, time, timezone
 
 
 def determine_new_status(
@@ -137,3 +138,108 @@ def process_issue(jira: JIRA, bitbucket: Bitbucket, issue, repos: List[str]) -> 
         jira.update_parent_status_if_needed(issue, child_status_changed)
     except Exception as e:
         logger.error(f"Failed to update parent status for {issue.key}: {e}")
+
+
+def validate_discord_content(content: str, max_length: int = 2000) -> str:
+    """Validate and truncate Discord content to fit within limits.
+
+    Args:
+        content: The content to validate
+        max_length: Maximum allowed length (default 2000 for messages)
+
+    Returns:
+        Truncated content if necessary
+    """
+    if len(content) <= max_length:
+        return content
+
+    # Truncate with a clear indication
+    truncation_msg = "... [TRUNCATED DUE TO LENGTH]"
+    available_space = max_length - len(truncation_msg)
+
+    if available_space > 0:
+        return content[:available_space] + truncation_msg
+    else:
+        # If truncation message itself is too long, just cut off
+        return content[:max_length]
+
+
+def validate_discord_embed_field(value: str, max_length: int = 1024) -> str:
+    """Validate and truncate Discord embed field value to fit within limits.
+
+    Args:
+        value: The field value to validate
+        max_length: Maximum allowed length (default 1024 for embed fields)
+
+    Returns:
+        Truncated value if necessary
+    """
+    if len(value) <= max_length:
+        return value
+
+    truncation_msg = "... (truncated)"
+    available_space = max_length - len(truncation_msg)
+
+    if available_space > 0:
+        return value[:available_space] + truncation_msg
+    else:
+        return value[:max_length]
+
+
+def parse_time_string(time_str: str) -> time:
+    """Parse time string in format HHMM to time object.
+
+    Args:
+        time_str: Time in format like '1000' for 10:00 AM or '1310' for 1:10 PM
+
+    Returns:
+        datetime.time object
+    """
+    if len(time_str) == 3:  # e.g., '900' for 9:00 AM
+        time_str = "0" + time_str
+    elif len(time_str) != 4:
+        raise ValueError(f"Invalid time format: {time_str}. Expected HHMM format.")
+
+    hour = int(time_str[:2])
+    minute = int(time_str[2:])
+
+    if hour > 23 or minute > 59:
+        raise ValueError(f"Invalid time: {hour}:{minute:02d}")
+
+    return time(hour, minute)
+
+
+def get_next_scheduled_run(run_times: List[str]) -> datetime:
+    """Get the next scheduled run time based on config.
+
+    Args:
+        run_times: List of time strings from config.json
+
+    Returns:
+        Next datetime when the script should run
+    """
+    now = datetime.now()
+    today_times = []
+
+    for time_str in run_times:
+        try:
+            parsed_time = parse_time_string(time_str)
+            today_datetime = datetime.combine(now.date(), parsed_time)
+
+            if today_datetime > now:
+                today_times.append(today_datetime)
+        except ValueError as e:
+            logger.error(f"Invalid time in config: {time_str} - {e}")
+            continue
+
+    if today_times:
+        return min(today_times)
+    else:
+        # All times for today have passed, get earliest time tomorrow
+        tomorrow = now.date() + timedelta(days=1)
+        try:
+            earliest_time = min([parse_time_string(t) for t in run_times])
+            return datetime.combine(tomorrow, earliest_time)
+        except ValueError:
+            # If all times are invalid, default to next hour
+            return now + timedelta(hours=1)

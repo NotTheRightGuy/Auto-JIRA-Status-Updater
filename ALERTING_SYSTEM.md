@@ -1,7 +1,24 @@
 # Complete Alerting System Summary
 
 ## Overview
-The JIRA automation system now includes comprehensive alerting functionality with the following features:
+The JIRA automation system includes comprehensive alerting functionality with **clear separation between automation and monitoring**:
+
+- **Automation**: Only modifies tickets assigned to the authenticated user (`currentUser()`)
+- **Monitoring**: Checks due dates and sends alerts for all users configured in `config.json`
+
+## 🔐 User Management Approach
+
+### Status Updates (currentUser() only)
+- **Scope**: Only processes tickets assigned to the authenticated user
+- **Authentication**: Uses `ATLASSIAN_EMAIL` and `JIRA_TOKEN` from `.env`
+- **Purpose**: Automatic status changes based on Git activity
+- **Security**: Limited to user's own tickets only
+
+### Due Date Alerts (all config users)
+- **Scope**: Monitors due dates for all users in `config.json`
+- **Configuration**: Uses specific JIRA IDs from config
+- **Purpose**: Team-wide due date notifications
+- **Coverage**: All 8 team members currently configured
 
 ## 🚨 Alert Types
 
