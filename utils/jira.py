@@ -1,6 +1,7 @@
 import logging
 from typing import List, Optional
 from jira import JIRA as jira_client
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,47 @@ ORDER BY created DESC
         except Exception as e:
             logger.error(f"Failed to retrieve open bugs: {e}")
             return []
+
+    def get_user_tasks_due_soon(self, user_jira_id: str) -> List:
+        """Get all open tasks assigned to a specific user that are due today or tomorrow."""
+        today = datetime.now().date()
+        tomorrow = today + timedelta(days=1)
+
+        # Format dates for JQL (YYYY-MM-DD)
+        today_str = today.strftime("%Y-%m-%d")
+        tomorrow_str = tomorrow.strftime("%Y-%m-%d")
+
+        jql = f"""
+assignee = "{user_jira_id}"
+AND status NOT IN (Closed, Done, Rejected, Resolved, "Deployed to production")
+AND duedate >= "{today_str}"
+AND duedate <= "{tomorrow_str}"
+ORDER BY duedate ASC, priority DESC
+        """
+        try:
+            due_tasks = self.client.search_issues(jql, expand="changelog")
+            logger.info(
+                f"Retrieved {len(due_tasks)} tasks due today or tomorrow for user {user_jira_id}"
+            )
+            return due_tasks
+        except Exception as e:
+            logger.error(f"Failed to retrieve due tasks for user {user_jira_id}: {e}")
+            return []
+
+    def get_all_users_tasks_due_soon(self, user_jira_ids: List[str]) -> dict:
+        """Get all open tasks due today or tomorrow for multiple users."""
+        all_due_tasks = {}
+
+        for user_id in user_jira_ids:
+            logger.debug(f"Checking due tasks for user: {user_id}")
+            user_tasks = self.get_user_tasks_due_soon(user_id)
+            if user_tasks:
+                all_due_tasks[user_id] = user_tasks
+                logger.info(f"Found {len(user_tasks)} due tasks for user {user_id}")
+            else:
+                logger.debug(f"No due tasks found for user {user_id}")
+
+        return all_due_tasks
 
     def change_status(self, issue, new_status: str) -> bool:
         """Change the status of an issue or bug."""

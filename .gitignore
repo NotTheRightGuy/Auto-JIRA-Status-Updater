@@ -4,6 +4,16 @@
 # Log files
 *.log
 
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+backups/
+
+# Test files
+test_*.db
+test_backup.db
+
 # Python cache
 __pycache__/
 *.py[cod]

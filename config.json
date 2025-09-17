@@ -1,11 +1,20 @@
 {
     "users": [
-        "712020:59149839-1dba-4692-b8b6-245b981d3f41",
-        "712020:8157fbf9-6c46-4378-95b4-6691dd2ba5a6",
-        "712020:588b9921-c245-4d18-8274-49b7b78f4ae4",
-        "712020:1c499e28-a210-4727-b648-088d871b59a1",
-        "61ca8d3468926d0068f0891a",
-        "61b6ddfc91c049006f9ee6ac",
-        "63e0f954790148a180969e47"
-    ]
+        {
+            "name": "Janmejay Chatterjee",
+            "jira_id": "712020:59149839-1dba-4692-b8b6-245b981d3f41"
+        }
+    ],
+    "repositories": [
+        "applift-lib",
+        "applift-app",
+        "dsp-customers-web",
+        "dsp-campaign-builder-web",
+        "dsp-audience-builder-web"
+    ],
+    "run_on": ["0900", "1200", "1500", "1800"],
+    "watch_interval": 5,
+    "status_updater_interval": 60,
+    "run_status_updater_on_interval": true,
+    "alert_users_at": 1000
 }
