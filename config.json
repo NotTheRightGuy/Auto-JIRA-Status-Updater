@@ -38,7 +38,9 @@
         "applift-app",
         "dsp-customers-web",
         "dsp-campaign-builder-web",
-        "dsp-audience-builder-web"
+        "dsp-audience-builder-web",
+        "dsp-advertiser-dashboard-web",
+        "organization-web"
     ],
     "run_on": ["0900", "1200", "1500", "1800"],
     "watch_interval": 5,

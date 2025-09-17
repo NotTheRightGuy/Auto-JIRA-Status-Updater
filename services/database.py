@@ -23,10 +23,15 @@ class TicketSnapshot:
     @classmethod
     def from_jira_issue(cls, issue):
         """Create a snapshot from a JIRA issue object."""
+        # Safely handle summary field that might be None or non-string
+        summary = issue.fields.summary or "No summary"
+        if not isinstance(summary, str):
+            summary = str(summary)
+
         return cls(
             key=issue.key,
             status=issue.fields.status.name,
-            summary=issue.fields.summary,
+            summary=summary,
             description=issue.fields.description or "",
             assignee=(
                 issue.fields.assignee.displayName

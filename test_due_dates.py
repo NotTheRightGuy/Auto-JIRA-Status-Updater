@@ -8,7 +8,7 @@ import os
 import json
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from utils.jira import JIRA
+from services.jira import JIRA
 
 load_dotenv()
 

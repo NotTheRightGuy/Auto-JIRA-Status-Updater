@@ -7,15 +7,15 @@ from datetime import datetime, timedelta, time, timezone
 from typing import Dict, List, Set
 import sys
 from dotenv import load_dotenv
-from utils.jira import JIRA
-from utils.bitbucket import Bitbucket
+from services.jira import JIRA
+from services.bitbucket import Bitbucket
 from logs.logger import logger
 from utils.helper import (
     process_issue,
     parse_time_string,
     get_next_scheduled_run,
 )
-from utils.database import DatabaseManager, TicketSnapshot
+from services.database import DatabaseManager, TicketSnapshot
 
 
 load_dotenv()
@@ -302,6 +302,22 @@ class JIRAStatusWorker:
         self.db_manager = DatabaseManager("jira_watcher.db")
         self.last_backup = None
 
+    async def _run_status_update_background(self):
+        """Run status update as a background task to prevent blocking the Discord bot."""
+        try:
+            logger.info("Starting background status update task")
+            await self.run_status_update()
+            await self.backup_database_if_needed()
+
+            if self.discord_handler:
+                logger.debug("Sending logs to Discord")
+                await self.discord_handler.send_logs()
+
+            logger.info("Background status update task completed successfully")
+        except Exception as e:
+            logger.error(f"Error in background status update task: {e}")
+            logger.debug("Background status update error details:", exc_info=True)
+
     async def run_status_update(self):
         """Run the JIRA status update process."""
         start_time = datetime.now()
@@ -358,67 +374,84 @@ class JIRAStatusWorker:
                 []
             )  # Track all status changes for status channel notifications
 
-            for issue in open_issues:
-                try:
-                    logger.debug(
-                        f"Processing issue {issue.key} - Current status: {issue.fields.status.name}"
-                    )
-                    # Capture the original status to check if it changed
-                    original_status = issue.fields.status.name
+            # Process issues in chunks to prevent blocking the event loop
+            chunk_size = 5  # Process 5 issues at a time
+            for i in range(0, len(open_issues), chunk_size):
+                chunk = open_issues[i : i + chunk_size]
+                logger.debug(
+                    f"Processing chunk {i//chunk_size + 1}/{(len(open_issues) + chunk_size - 1)//chunk_size} ({len(chunk)} issues)"
+                )
 
-                    # Process the issue
-                    logger.debug(
-                        f"Calling process_issue for {issue.key} with {len(repos)} repositories"
-                    )
-                    process_issue(jira, bitbucket, issue, repos)
-
-                    # Check if status changed by refetching the issue
-                    updated_issue = jira.client.issue(issue.key)
-                    new_status = updated_issue.fields.status.name
-
-                    if original_status != new_status:
-                        logger.info(
-                            f"Status updated for {issue.key}: {original_status} -> {new_status}"
-                        )
+                for issue in chunk:
+                    try:
                         logger.debug(
-                            f"Issue {issue.key} assignee: {updated_issue.fields.assignee}"
+                            f"Processing issue {issue.key} - Current status: {issue.fields.status.name}"
                         )
-                        issues_updated += 1
+                        # Capture the original status to check if it changed
+                        original_status = issue.fields.status.name
 
-                        # Add to status changes for general notification
-                        status_changes.append(
-                            {
-                                "ticket_id": issue.key,
-                                "old_status": original_status,
-                                "new_status": new_status,
-                                "url": f"{jira.host}/browse/{issue.key}",
-                                "type": "issue",
-                            }
+                        # Process the issue
+                        logger.debug(
+                            f"Calling process_issue for {issue.key} with {len(repos)} repositories"
                         )
+                        await process_issue(jira, bitbucket, issue, repos)
 
-                        # Check if this ticket is being watched for watch channel alerts
-                        watchers = self.db_manager.get_watchers_for_ticket(issue.key)
-                        if watchers:
-                            logger.debug(
-                                f"Issue {issue.key} has {len(watchers)} watchers"
+                        # Check if status changed by refetching the issue
+                        updated_issue = jira.client.issue(issue.key)
+                        new_status = updated_issue.fields.status.name
+
+                        if original_status != new_status:
+                            logger.info(
+                                f"Status updated for {issue.key}: {original_status} -> {new_status}"
                             )
-                            worker_changes.append(
+                            logger.debug(
+                                f"Issue {issue.key} assignee: {updated_issue.fields.assignee}"
+                            )
+                            issues_updated += 1
+
+                            # Add to status changes for general notification
+                            status_changes.append(
                                 {
                                     "ticket_id": issue.key,
-                                    "change": f"Status: {original_status} -> {new_status}",
+                                    "old_status": original_status,
+                                    "new_status": new_status,
                                     "url": f"{jira.host}/browse/{issue.key}",
-                                    "watchers": watchers,
+                                    "type": "issue",
                                 }
                             )
 
-                    issues_processed += 1
-                    logger.debug(
-                        f"Successfully processed issue {issue.key} ({issues_processed}/{len(open_issues)})"
-                    )
+                            # Check if this ticket is being watched for watch channel alerts
+                            watchers = self.db_manager.get_watchers_for_ticket(
+                                issue.key
+                            )
+                            if watchers:
+                                logger.debug(
+                                    f"Issue {issue.key} has {len(watchers)} watchers"
+                                )
+                                worker_changes.append(
+                                    {
+                                        "ticket_id": issue.key,
+                                        "change": f"Status: {original_status} -> {new_status}",
+                                        "url": f"{jira.host}/browse/{issue.key}",
+                                        "watchers": watchers,
+                                    }
+                                )
 
-                except Exception as e:
-                    logger.error(f"Error processing issue {issue.key}: {str(e)}")
-                    logger.debug(f"Issue processing error details: {e}", exc_info=True)
+                        issues_processed += 1
+                        logger.debug(
+                            f"Successfully processed issue {issue.key} ({issues_processed}/{len(open_issues)})"
+                        )
+
+                    except Exception as e:
+                        logger.error(f"Error processing issue {issue.key}: {str(e)}")
+                        logger.debug(
+                            f"Issue processing error details: {e}", exc_info=True
+                        )
+
+                # Yield control back to the event loop between chunks
+                if i + chunk_size < len(open_issues):
+                    logger.debug("Yielding control to event loop between issue chunks")
+                    await asyncio.sleep(0.1)  # Small delay to allow other tasks to run
 
             # Process bugs
             logger.info("Fetching all open JIRA bugs for processing")
@@ -429,65 +462,82 @@ class JIRAStatusWorker:
             bugs_processed = 0
             bugs_updated = 0
 
-            for bug in open_bugs:
-                try:
-                    logger.debug(
-                        f"Processing bug {bug.key} - Current status: {bug.fields.status.name}"
-                    )
-                    # Capture the original status to check if it changed
-                    original_status = bug.fields.status.name
+            # Process bugs in chunks to prevent blocking the event loop
+            chunk_size = 5  # Process 5 bugs at a time
+            for i in range(0, len(open_bugs), chunk_size):
+                chunk = open_bugs[i : i + chunk_size]
+                logger.debug(
+                    f"Processing bug chunk {i//chunk_size + 1}/{(len(open_bugs) + chunk_size - 1)//chunk_size} ({len(chunk)} bugs)"
+                )
 
-                    # Process the bug
-                    logger.debug(
-                        f"Calling process_issue for bug {bug.key} with {len(repos)} repositories"
-                    )
-                    process_issue(jira, bitbucket, bug, repos)
-
-                    # Check if status changed by refetching the bug
-                    updated_bug = jira.client.issue(bug.key)
-                    new_status = updated_bug.fields.status.name
-
-                    if original_status != new_status:
-                        logger.info(
-                            f"Bug status updated for {bug.key}: {original_status} -> {new_status}"
-                        )
+                for bug in chunk:
+                    try:
                         logger.debug(
-                            f"Bug {bug.key} assignee: {updated_bug.fields.assignee}"
+                            f"Processing bug {bug.key} - Current status: {bug.fields.status.name}"
                         )
-                        bugs_updated += 1
+                        # Capture the original status to check if it changed
+                        original_status = bug.fields.status.name
 
-                        # Add to status changes for general notification
-                        status_changes.append(
-                            {
-                                "ticket_id": bug.key,
-                                "old_status": original_status,
-                                "new_status": new_status,
-                                "url": f"{jira.host}/browse/{bug.key}",
-                                "type": "bug",
-                            }
+                        # Process the bug
+                        logger.debug(
+                            f"Calling process_issue for bug {bug.key} with {len(repos)} repositories"
                         )
+                        await process_issue(jira, bitbucket, bug, repos)
 
-                        # Check if this ticket is being watched for watch channel alerts
-                        watchers = self.db_manager.get_watchers_for_ticket(bug.key)
-                        if watchers:
-                            logger.debug(f"Bug {bug.key} has {len(watchers)} watchers")
-                            worker_changes.append(
+                        # Check if status changed by refetching the bug
+                        updated_bug = jira.client.issue(bug.key)
+                        new_status = updated_bug.fields.status.name
+
+                        if original_status != new_status:
+                            logger.info(
+                                f"Bug status updated for {bug.key}: {original_status} -> {new_status}"
+                            )
+                            logger.debug(
+                                f"Bug {bug.key} assignee: {updated_bug.fields.assignee}"
+                            )
+                            bugs_updated += 1
+
+                            # Add to status changes for general notification
+                            status_changes.append(
                                 {
                                     "ticket_id": bug.key,
-                                    "change": f"Status: {original_status} -> {new_status}",
+                                    "old_status": original_status,
+                                    "new_status": new_status,
                                     "url": f"{jira.host}/browse/{bug.key}",
-                                    "watchers": watchers,
+                                    "type": "bug",
                                 }
                             )
 
-                    bugs_processed += 1
-                    logger.debug(
-                        f"Successfully processed bug {bug.key} ({bugs_processed}/{len(open_bugs)})"
-                    )
+                            # Check if this ticket is being watched for watch channel alerts
+                            watchers = self.db_manager.get_watchers_for_ticket(bug.key)
+                            if watchers:
+                                logger.debug(
+                                    f"Bug {bug.key} has {len(watchers)} watchers"
+                                )
+                                worker_changes.append(
+                                    {
+                                        "ticket_id": bug.key,
+                                        "change": f"Status: {original_status} -> {new_status}",
+                                        "url": f"{jira.host}/browse/{bug.key}",
+                                        "watchers": watchers,
+                                    }
+                                )
 
-                except Exception as e:
-                    logger.error(f"Error processing bug {bug.key}: {str(e)}")
-                    logger.debug(f"Bug processing error details: {e}", exc_info=True)
+                        bugs_processed += 1
+                        logger.debug(
+                            f"Successfully processed bug {bug.key} ({bugs_processed}/{len(open_bugs)})"
+                        )
+
+                    except Exception as e:
+                        logger.error(f"Error processing bug {bug.key}: {str(e)}")
+                        logger.debug(
+                            f"Bug processing error details: {e}", exc_info=True
+                        )
+
+                # Yield control back to the event loop between chunks
+                if i + chunk_size < len(open_bugs):
+                    logger.debug("Yielding control to event loop between bug chunks")
+                    await asyncio.sleep(0.1)  # Small delay to allow other tasks to run
 
             # Send worker change alerts to watch channel
             if worker_changes:
@@ -597,8 +647,6 @@ class JIRAStatusWorker:
                 logger.warning("No user JIRA IDs found in config.json")
                 return
 
-            logger.debug(f"Checking due dates for {len(user_jira_ids)} users")
-
             # Initialize JIRA client
             jira_client_for_alerts = JIRA(
                 host=os.getenv("ATLASSIAN_URL"),
@@ -612,9 +660,24 @@ class JIRAStatusWorker:
             )
 
             if due_tasks_by_user:
-                total_tasks = sum(len(tasks) for tasks in due_tasks_by_user.values())
+                # Validate and calculate total tasks with proper error handling
+                total_tasks = 0
+                valid_user_count = 0
+
+                for user_id, tasks in due_tasks_by_user.items():
+                    if isinstance(tasks, (list, tuple)):
+                        total_tasks += len(tasks)
+                        valid_user_count += 1
+                        logger.debug(f"User {user_id} has {len(tasks)} due tasks")
+                    else:
+                        logger.error(
+                            f"Invalid task data for user {user_id}: expected list but got {type(tasks)} with value {tasks}"
+                        )
+                        # Remove invalid entry to prevent further errors
+                        due_tasks_by_user.pop(user_id, None)
+
                 logger.info(
-                    f"Found {total_tasks} tasks due today or tomorrow for {len(due_tasks_by_user)} users"
+                    f"Found {total_tasks} tasks due today or tomorrow for {valid_user_count} users"
                 )
 
                 # Send alerts
@@ -983,13 +1046,11 @@ class JIRAStatusWorker:
 
                 # Run the update if needed
                 if should_run_scheduled or should_run_interval:
-                    logger.debug("Starting status update and backup sequence")
-                    await self.run_status_update()
-                    await self.backup_database_if_needed()
-
-                    if self.discord_handler:
-                        logger.debug("Sending logs to Discord")
-                        await self.discord_handler.send_logs()
+                    logger.debug(
+                        "Starting status update and backup sequence as background task"
+                    )
+                    # Create background task to prevent blocking the Discord bot
+                    asyncio.create_task(self._run_status_update_background())
 
                 # Check if we should send due date alerts (daily at configured time)
                 alert_time_str = config.get("alert_users_at", "1000")
@@ -1286,6 +1347,13 @@ async def send_due_date_alerts(due_tasks_by_user, user_config):
         tomorrow = today + timedelta(days=1)
 
         for user_jira_id, tasks in due_tasks_by_user.items():
+            # Validate that tasks is a list/iterable
+            if not isinstance(tasks, (list, tuple)):
+                bot_logger.error(
+                    f"Invalid task data for user {user_jira_id}: expected list but got {type(tasks)} with value {tasks}"
+                )
+                continue
+
             user_name = user_names.get(user_jira_id, user_jira_id)
 
             # Separate tasks by due date
@@ -1293,13 +1361,22 @@ async def send_due_date_alerts(due_tasks_by_user, user_config):
             tomorrow_tasks = []
 
             for task in tasks:
-                due_date_str = task.fields.duedate
-                if due_date_str:
-                    due_date = datetime.strptime(due_date_str, "%Y-%m-%d").date()
-                    if due_date == today:
-                        today_tasks.append(task)
-                    elif due_date == tomorrow:
-                        tomorrow_tasks.append(task)
+                try:
+                    # Access the "End date" custom field (customfield_11145)
+                    # This corresponds to the "end date[date]" field used in the JQL query
+                    due_date_str = task.raw["fields"].get("customfield_11145")
+                    if due_date_str:
+                        due_date = datetime.strptime(due_date_str, "%Y-%m-%d").date()
+                        if due_date == today:
+                            today_tasks.append(task)
+                        elif due_date == tomorrow:
+                            tomorrow_tasks.append(task)
+                except Exception as e:
+                    logger.error(f"Error processing task {task.key} end date: {e}")
+                    logger.debug(
+                        f"Task end date value: {task.raw['fields'].get('customfield_11145')} (type: {type(task.raw['fields'].get('customfield_11145'))})"
+                    )
+                    continue
 
             if not today_tasks and not tomorrow_tasks:
                 continue
@@ -1324,7 +1401,13 @@ async def send_due_date_alerts(due_tasks_by_user, user_config):
                         else "None"
                     )
                     task_url = f"{os.getenv('ATLASSIAN_URL')}browse/{task.key}"
-                    line = f"• [{task.key}]({task_url}) - {task.fields.summary[:60]}{'...' if len(task.fields.summary) > 60 else ''} (Priority: {priority})"
+
+                    # Safely handle summary field that might be None or non-string
+                    summary = task.fields.summary or "No summary"
+                    if not isinstance(summary, str):
+                        summary = str(summary)
+
+                    line = f"• [{task.key}]({task_url}) - {summary[:60]}{'...' if len(summary) > 60 else ''} (Priority: {priority})"
 
                     # Check if adding this line would exceed the limit
                     if current_length + len(line) + 1 > max_field_length:
@@ -1353,7 +1436,13 @@ async def send_due_date_alerts(due_tasks_by_user, user_config):
                         else "None"
                     )
                     task_url = f"{os.getenv('ATLASSIAN_URL')}browse/{task.key}"
-                    line = f"• [{task.key}]({task_url}) - {task.fields.summary[:60]}{'...' if len(task.fields.summary) > 60 else ''} (Priority: {priority})"
+
+                    # Safely handle summary field that might be None or non-string
+                    summary = task.fields.summary or "No summary"
+                    if not isinstance(summary, str):
+                        summary = str(summary)
+
+                    line = f"• [{task.key}]({task_url}) - {summary[:60]}{'...' if len(summary) > 60 else ''} (Priority: {priority})"
 
                     # Check if adding this line would exceed the limit
                     if current_length + len(line) + 1 > max_field_length:

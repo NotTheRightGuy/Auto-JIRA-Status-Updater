@@ -4,11 +4,11 @@ import asyncio
 import discord
 from datetime import datetime
 from dotenv import load_dotenv
-from utils.jira import JIRA
-from utils.bitbucket import Bitbucket
+from services.jira import JIRA
+from services.bitbucket import Bitbucket
 from logs.logger import logger
 from utils.helper import process_issue
-from utils.database import DatabaseManager
+from services.database import DatabaseManager
 
 import json
 

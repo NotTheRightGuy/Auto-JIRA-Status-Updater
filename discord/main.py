@@ -10,171 +10,20 @@ import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Set
 import sys
+from services.jira import JIRAWatcher, JIRAWatcherBot
 
 # Add the parent directory to the path to import our utils
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils.jira import JIRA
-from utils.database import DatabaseManager, TicketSnapshot
+from services.jira import JIRA
+from services.database import DatabaseManager, TicketSnapshot
 
 # Set up logging
 logger = logging.getLogger(__name__)
 
 
-class JIRAWatcher:
-    """Manages JIRA ticket watching and change detection using SQLite."""
-
-    def __init__(self, jira_client: JIRA, db_manager: DatabaseManager):
-        self.jira = jira_client
-        self.db = db_manager
-
-    def add_watcher(self, ticket_id: str, user: discord.User) -> bool:
-        """Add a user to watch a specific ticket."""
-        logger.debug(
-            f"Attempting to add watcher for ticket {ticket_id} by user {user.id}"
-        )
-        # First, try to fetch the ticket to validate it exists
-        try:
-            issue = self.jira.client.issue(ticket_id)
-            logger.debug(
-                f"Successfully fetched JIRA issue {ticket_id}: {issue.fields.summary}"
-            )
-            snapshot = TicketSnapshot.from_jira_issue(issue)
-
-            # Save the initial snapshot
-            self.db.save_ticket_snapshot(snapshot)
-            logger.debug(f"Saved initial snapshot for ticket {ticket_id}")
-
-            # Add the watcher
-            success = self.db.add_watcher(
-                ticket_id=ticket_id,
-                user_id=user.id,
-                username=user.name,
-                discriminator=(
-                    user.discriminator if hasattr(user, "discriminator") else "0000"
-                ),
-            )
-
-            if success:
-                logger.info(
-                    f"Successfully added watcher for {ticket_id}: {user.name} (ID: {user.id})"
-                )
-                logger.debug(
-                    f"Watcher details - username: {user.name}, discriminator: {user.discriminator if hasattr(user, 'discriminator') else '0000'}"
-                )
-            else:
-                logger.warning(
-                    f"Failed to add watcher for {ticket_id}: database operation failed"
-                )
-
-            return success
-
-        except Exception as e:
-            logger.error(f"Failed to add watcher for {ticket_id}: {str(e)}")
-            logger.debug(
-                f"Add watcher error details for user {user.id}:", exc_info=True
-            )
-            return False
-
-    def remove_watcher(self, ticket_id: str, user_id: int) -> bool:
-        """Remove a user from watching a specific ticket."""
-        success = self.db.remove_watcher(ticket_id, user_id)
-
-        # Clean up orphaned snapshots
-        if success:
-            self.db.cleanup_orphaned_snapshots()
-
-        return success
-
-    def get_watched_tickets_for_user(self, user_id: int) -> List[str]:
-        """Get all tickets being watched by a specific user."""
-        return self.db.get_watched_tickets_for_user(user_id)
-
-    async def check_for_changes(self, bot_client: discord.Client) -> List[Dict]:
-        """Check all watched tickets for changes and return notifications to send."""
-        notifications = []
-        watched_tickets = self.db.get_all_watched_tickets()
-
-        logger.debug(f"Checking {len(watched_tickets)} watched tickets for changes")
-
-        for ticket_id in watched_tickets:
-            try:
-                # Fetch current state from JIRA
-                issue = self.jira.client.issue(ticket_id)
-                current_snapshot = TicketSnapshot.from_jira_issue(issue)
-
-                # Get stored snapshot
-                old_snapshot = self.db.get_ticket_snapshot(ticket_id)
-
-                if old_snapshot:
-                    # Compare snapshots for changes
-                    changes = current_snapshot.has_changes(old_snapshot)
-
-                    if changes:
-                        logger.info(f"Changes detected in {ticket_id}: {changes}")
-
-                        # Get all watchers for this ticket
-                        watchers = self.db.get_watchers_for_ticket(ticket_id)
-
-                        for watcher in watchers:
-                            # Get Discord user object
-                            try:
-                                user = await bot_client.fetch_user(watcher["user_id"])
-                                notifications.append(
-                                    {
-                                        "user": user,
-                                        "ticket_id": ticket_id,
-                                        "changes": changes,
-                                        "url": f"{self.jira.host}/browse/{ticket_id}",
-                                    }
-                                )
-                            except discord.NotFound:
-                                logger.warning(
-                                    f"Could not find Discord user {watcher['user_id']}"
-                                )
-                            except Exception as e:
-                                logger.error(
-                                    f"Error fetching Discord user {watcher['user_id']}: {e}"
-                                )
-
-                # Update snapshot regardless of changes
-                self.db.save_ticket_snapshot(current_snapshot)
-
-            except Exception as e:
-                logger.error(f"Error checking ticket {ticket_id}: {e}")
-
-                # If ticket doesn't exist anymore, clean up watchers
-                if (
-                    "does not exist" in str(e).lower()
-                    or "issue does not exist" in str(e).lower()
-                ):
-                    logger.info(
-                        f"Ticket {ticket_id} no longer exists, removing all watchers"
-                    )
-                    # Get all watchers for cleanup
-                    watchers = self.db.get_watchers_for_ticket(ticket_id)
-                    for watcher in watchers:
-                        self.db.remove_watcher(ticket_id, watcher["user_id"])
-
-        return notifications
-
-
 # Initialize clients
 intents = discord.Intents.default()
 intents.message_content = True
-
-
-class JIRAWatcherBot(commands.Bot):
-    def __init__(self):
-        super().__init__(command_prefix="!", intents=intents)
-
-    async def setup_hook(self):
-        # Sync the command tree
-        try:
-            synced = await self.tree.sync()
-            print(f"Synced {len(synced)} command(s)")
-        except Exception as e:
-            print(f"Failed to sync commands: {e}")
-
 
 bot = JIRAWatcherBot()
 
@@ -199,8 +48,17 @@ async def monitor_tickets():
 
     while not bot.is_closed():
         try:
-            notifications = await watcher.check_for_changes(bot)
+            logger.info("Starting ticket monitoring cycle")
+            start_time = asyncio.get_event_loop().time()
 
+            # Use asyncio.wait_for to timeout the entire monitoring cycle
+            notifications = await asyncio.wait_for(
+                watcher.check_for_changes(bot),
+                timeout=120.0,  # 2 minute timeout for entire monitoring cycle
+            )
+
+            # Process notifications
+            notification_count = 0
             for notification in notifications:
                 user = notification["user"]
                 ticket_id = notification["ticket_id"]
@@ -219,16 +77,28 @@ async def monitor_tickets():
 
                 try:
                     await user.send(embed=embed)
+                    notification_count += 1
                 except discord.Forbidden:
-                    logging.warning(
-                        f"Could not send DM to {user.name}#{user.discriminator}"
-                    )
+                    logger.warning(f"Could not send DM to {user.name} (ID: {user.id})")
+                except Exception as e:
+                    logger.error(f"Error sending notification to {user.name}: {e}")
 
+            elapsed_time = asyncio.get_event_loop().time() - start_time
+            logger.info(
+                f"Monitoring cycle completed in {elapsed_time:.2f}s, sent {notification_count} notifications"
+            )
+
+        except asyncio.TimeoutError:
+            logger.error("Monitoring cycle timed out after 2 minutes")
         except Exception as e:
-            logging.error(f"Error in monitor_tickets: {e}")
+            logger.error(f"Error in monitor_tickets: {e}")
 
-        # Wait 5 minutes before next check
-        await asyncio.sleep(300)
+        # Wait 5 minutes before next check, but allow for graceful shutdown
+        try:
+            await asyncio.sleep(300)  # 5 minutes
+        except asyncio.CancelledError:
+            logger.info("Monitoring task cancelled")
+            break
 
 
 @bot.event
@@ -238,8 +108,8 @@ async def on_ready():
 
     try:
         # Sync commands globally
-        synced = await bot.tree.sync()
-        logger.info(f"Synced {len(synced)} slash command(s) globally")
+        synced = await bot.tree.sync(guild=discord.Object(id=os.getenv("GUILD_ID")))
+        logger.info(f"Synced {len(synced)} slash command(s) with Discord")
 
         # List the synced commands
         for command in synced:

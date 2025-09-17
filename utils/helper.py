@@ -1,7 +1,7 @@
 from typing import Optional, List
 from logs.logger import logger
-from utils.jira import JIRA
-from utils.bitbucket import Bitbucket
+from services.jira import JIRA
+from services.bitbucket import Bitbucket
 from datetime import datetime, timedelta, time, timezone
 
 
@@ -66,7 +66,9 @@ def determine_new_status(
     return None
 
 
-def process_issue(jira: JIRA, bitbucket: Bitbucket, issue, repos: List[str]) -> None:
+async def process_issue(
+    jira: JIRA, bitbucket: Bitbucket, issue, repos: List[str]
+) -> None:
     """
     Process a single JIRA issue and update its status based on branch/PR state.
 
@@ -125,17 +127,37 @@ def process_issue(jira: JIRA, bitbucket: Bitbucket, issue, repos: List[str]) -> 
 
     child_status_changed = False
     if new_status:
-        if jira.change_status(issue, new_status):
-            logger.info(f"Successfully changed status of {issue.key} to '{new_status}'")
-            child_status_changed = True
+        # Use async version of change_status if available, otherwise fall back to sync
+        if hasattr(jira, "change_status_async"):
+            if await jira.change_status_async(issue, new_status):
+                logger.info(
+                    f"Successfully changed status of {issue.key} to '{new_status}'"
+                )
+                child_status_changed = True
+            else:
+                logger.error(
+                    f"Failed to change status of {issue.key} to '{new_status}'"
+                )
         else:
-            logger.error(f"Failed to change status of {issue.key} to '{new_status}'")
+            if jira.change_status(issue, new_status):
+                logger.info(
+                    f"Successfully changed status of {issue.key} to '{new_status}'"
+                )
+                child_status_changed = True
+            else:
+                logger.error(
+                    f"Failed to change status of {issue.key} to '{new_status}'"
+                )
     else:
         logger.info(f"No status change needed for {issue.key}")
 
     # Update parent status if child status changed
     try:
-        jira.update_parent_status_if_needed(issue, child_status_changed)
+        # Use async version if available, otherwise fall back to sync
+        if hasattr(jira, "update_parent_status_if_needed_async"):
+            await jira.update_parent_status_if_needed_async(issue, child_status_changed)
+        else:
+            jira.update_parent_status_if_needed(issue, child_status_changed)
     except Exception as e:
         logger.error(f"Failed to update parent status for {issue.key}: {e}")
 
