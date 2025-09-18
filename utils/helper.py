@@ -11,6 +11,7 @@ def determine_new_status(
     pr_exists: bool,
     pr_merged: bool,
     is_bug: bool = False,
+    is_story: bool = False,
 ) -> Optional[str]:
     """
     Determine the new status based on branch and PR state.
@@ -21,6 +22,7 @@ def determine_new_status(
         pr_exists: Whether a PR exists for this issue
         pr_merged: Whether the PR is merged
         is_bug: Whether this is a bug issue type
+        is_story: Whether this is a story issue type
 
     Returns:
         New status to set, or None if no change needed
@@ -43,10 +45,32 @@ def determine_new_status(
                 logger.info(f"PR merged for issue, changing status to 'Dev Testing'")
                 return "Dev Testing"
     elif pr_exists:
-        # Branch exists, PR exists but not merged -> In Review
-        if current_status not in ["In Review", "Dev Testing", "Performing DevTesing"]:
-            logger.info(f"Open PR found, changing status to 'In Review'")
-            return "In Review"
+        # Branch exists, PR exists but not merged
+        if current_status == "Dev Testing":
+            # Special case: If in Dev Testing with unmerged PR, move back to appropriate status
+            if is_story:
+                # For stories: Dev Testing -> In Progress (since stories don't have In Review)
+                logger.info(
+                    f"Dev Testing status with unmerged PR found for story, moving back to 'In Progress'"
+                )
+                return "In Progress"
+            else:
+                # For regular issues: Dev Testing -> In Review
+                logger.info(
+                    f"Dev Testing status with unmerged PR found, moving back to 'In Review'"
+                )
+                return "In Review"
+        elif current_status not in ["In Review", "Dev Testing", "Performing DevTesing"]:
+            if is_story:
+                # Stories don't typically have "In Review" status, keep current or move to In Progress
+                if current_status != "In Progress":
+                    logger.info(
+                        f"Open PR found for story, changing status to 'In Progress'"
+                    )
+                    return "In Progress"
+            else:
+                logger.info(f"Open PR found, changing status to 'In Review'")
+                return "In Review"
     else:
         # Branch exists but no PR -> In Progress
         valid_statuses = ["In Progress", "In Review", "Dev Testing", "Done"]
@@ -80,10 +104,13 @@ async def process_issue(
     """
     logger.info(f"Processing issue {issue.key}: {issue.fields.status.name}")
 
-    # Check if this is a bug
+    # Check if this is a bug or story
     issue_type = issue.fields.issuetype.name.lower()
     is_bug = issue_type in ["bug", "implementation bug"]
-    logger.debug(f"Issue type: {issue.fields.issuetype.name}, is_bug: {is_bug}")
+    is_story = issue_type in ["story"]
+    logger.debug(
+        f"Issue type: {issue.fields.issuetype.name}, is_bug: {is_bug}, is_story: {is_story}"
+    )
 
     branch_found = False
     pr_found = False
@@ -122,7 +149,7 @@ async def process_issue(
 
     # Determine if status change is needed
     new_status = determine_new_status(
-        issue.fields.status.name, branch_found, pr_found, pr_merged, is_bug
+        issue.fields.status.name, branch_found, pr_found, pr_merged, is_bug, is_story
     )
 
     child_status_changed = False
@@ -265,3 +292,64 @@ def get_next_scheduled_run(run_times: List[str]) -> datetime:
         except ValueError:
             # If all times are invalid, default to next hour
             return now + timedelta(hours=1)
+
+
+def parse_reminder_date(
+    date_string: str, time_string: Optional[str] = None
+) -> Optional[datetime]:
+    """
+    Parse a date string for reminders supporting multiple formats.
+
+    Args:
+        date_string: Date in formats like "today", "tomorrow", "tmrw", "dd/mm/yyyy"
+        time_string: Optional time in format "HH:MM" (24-hour format)
+
+    Returns:
+        datetime object or None if parsing fails
+    """
+    try:
+        now = datetime.now()
+        target_date = None
+
+        date_string = date_string.lower().strip()
+
+        # Handle relative dates
+        if date_string in ["today"]:
+            target_date = now.date()
+        elif date_string in ["tomorrow", "tmrw"]:
+            target_date = (now + timedelta(days=1)).date()
+        else:
+            # Try to parse DD/MM/YYYY format
+            try:
+                target_date = datetime.strptime(date_string, "%d/%m/%Y").date()
+            except ValueError:
+                # Try DD/MM/YY format
+                try:
+                    target_date = datetime.strptime(date_string, "%d/%m/%y").date()
+                except ValueError:
+                    logger.warning(f"Could not parse date string: {date_string}")
+                    return None
+
+        # Parse time if provided
+        if time_string:
+            try:
+                time_obj = datetime.strptime(time_string.strip(), "%H:%M").time()
+                result = datetime.combine(target_date, time_obj)
+            except ValueError:
+                logger.warning(f"Could not parse time string: {time_string}")
+                # Default to current time if time parsing fails
+                result = datetime.combine(target_date, now.time())
+        else:
+            # Default to current time if no time specified
+            result = datetime.combine(target_date, now.time())
+
+        # Ensure the reminder is in the future
+        if result <= now:
+            logger.warning(f"Reminder time {result} is in the past")
+            return None
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Error parsing reminder date: {e}")
+        return None

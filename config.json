@@ -42,9 +42,9 @@
         "dsp-advertiser-dashboard-web",
         "organization-web"
     ],
-    "run_on": ["0900", "1200", "1500", "1800"],
-    "watch_interval": 5,
+    "run_on": ["1000", "1300", "1500", "1700"],
+    "watch_interval": 10,
     "status_updater_interval": 60,
-    "run_status_updater_on_interval": true,
+    "run_status_updater_on_interval": false,
     "alert_users_at": 1000
 }

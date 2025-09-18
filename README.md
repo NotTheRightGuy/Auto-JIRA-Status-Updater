@@ -330,6 +330,453 @@ ticket_snapshots (
 └── README.md            # Documentation
 ```
 
+# User Management & Separation of Concerns
+
+## Overview
+The JIRA automation system uses a clear separation between **automation actions** and **monitoring/alerting** to ensure security and proper scope of operations.
+
+## 🔐 Authentication & User Separation
+
+### Current User (Authentication)
+- **Used for**: Status updates and automation actions
+- **Authentication**: Uses `ATLASSIAN_EMAIL` and `JIRA_TOKEN` from `.env`
+- **Scope**: Only processes tickets assigned to the authenticated user
+- **Functions**: `get_all_open_issues()`, `get_all_open_bugs()`, `change_status()`
+- **JQL**: `assignee = currentUser()`
+
+### Config Users (Monitoring)
+- **Used for**: Due date alerts and monitoring
+- **Configuration**: Defined in `config.json` with specific JIRA IDs
+- **Scope**: Can query tickets for any configured user
+- **Functions**: `get_user_tasks_due_soon()`, `get_all_users_tasks_due_soon()`
+- **JQL**: `assignee = "specific_jira_id"`
+
+## 📋 Current Implementation
+
+### Status Updates (currentUser() only)
+```python
+def get_all_open_issues(self) -> List:
+    """Get all open issues assigned to the current user."""
+    jql = """
+assignee = currentUser()
+AND status NOT IN (Closed, Done, Rejected, Resolved, "Deployed to production")
+AND type IN (Sub-task, Subtask)
+ORDER BY created DESC
+    """
+```
+
+### Due Date Monitoring (all config users)
+```python
+def get_user_tasks_due_soon(self, user_jira_id: str) -> List:
+    """Get all open tasks assigned to a specific user that are due today or tomorrow."""
+    jql = f"""
+assignee = "{user_jira_id}"
+AND status NOT IN (Closed, Done, Rejected, Resolved, "Deployed to production")
+AND duedate >= "{today_str}"
+AND duedate <= "{tomorrow_str}"
+ORDER BY duedate ASC, priority DESC
+    """
+```
+
+## 🎯 Operational Flow
+
+### Status Update Process
+1. Authenticate as current user (`ATLASSIAN_EMAIL`)
+2. Query only tickets assigned to current user
+3. Process and update status based on Git activity
+4. Send status change notifications
+
+### Due Date Alert Process
+1. Read all users from `config.json`
+2. For each user, query their assigned tickets
+3. Check due dates (today/tomorrow)
+4. Send personalized alerts with user names
+
+## ⚙️ Configuration
+
+### .env (Authentication)
+```bash
+ATLASSIAN_EMAIL="janmejay.c@iqm.com"  # Used for currentUser() authentication
+JIRA_TOKEN="..."                      # Authentication token
+```
+
+### config.json (Monitoring Users)
+```json
+{
+    "users": [
+        {
+            "name": "Devarsh Gandhi",
+            "jira_id": "712020:8157fbf9-6c46-4378-95b4-6691dd2ba5a6"
+        },
+        {
+            "name": "Janmejay Chatterjee", 
+            "jira_id": "712020:025d4fbf-7c7c-44d4-a9e0-98e741d936fa"
+        },
+        {
+            "name": "Nitish Jaiswal",
+            "jira_id": "712020:59149839-1dba-4692-b8b6-245b981d3f41"
+        }
+        // ... other users
+    ]
+}
+```
+
+## 🛡️ Security & Permissions
+
+### Why This Separation?
+1. **Limited Automation Scope**: Only the authenticated user's tickets can be modified
+2. **Broad Monitoring Capability**: Can monitor due dates for all team members
+3. **Permission Control**: Status changes require proper authentication
+4. **Team Visibility**: Everyone gets due date alerts regardless of who runs the bot
+
+### Required Permissions
+- **Authenticated User**: Must have permission to view and edit their own tickets
+- **Config Users**: Must be visible to the authenticated user (same project/team)
+- **JIRA Token**: Must have appropriate project access for both automation and monitoring
+
+## 📊 Current Users in Config
+
+| Name | JIRA ID | Purpose |
+|------|---------|---------|
+| Devarsh Gandhi | 712020:8157fbf9-6c46-4378-95b4-6691dd2ba5a6 | Due date monitoring |
+| Janmejay Chatterjee | 712020:025d4fbf-7c7c-44d4-a9e0-98e741d936fa | Due date monitoring |
+| Nitish Jaiswal | 712020:59149839-1dba-4692-b8b6-245b981d3f41 | Due date monitoring |
+| Vivek Modiya | 63e0f954790148a180969e47 | Due date monitoring |
+| Varun Patel | 712020:588b9921-c245-4d18-8274-49b7b78f4ae4 | Due date monitoring |
+| Divya Panchori | 712020:1c499e28-a210-4727-b648-088d871b59a1 | Due date monitoring |
+| Desh Deepak Singh | 61ca8d3468926d0068f0891a | Due date monitoring |
+| Aravind | 61b6ddfc91c049006f9ee6ac | Due date monitoring |
+
+## 🔍 Verification
+
+### Check Status Update Scope
+```bash
+# This query shows what tickets can be automatically updated
+assignee = currentUser()
+AND status NOT IN (Closed, Done, Rejected, Resolved, "Deployed to production")
+```
+
+### Check Due Date Monitoring Scope  
+```bash
+# This query shows what tickets are monitored for due dates (per user)
+assignee = "712020:8157fbf9-6c46-4378-95b4-6691dd2ba5a6"
+AND status NOT IN (Closed, Done, Rejected, Resolved, "Deployed to production")
+AND duedate >= "2025-09-17"
+AND duedate <= "2025-09-18"
+```
+
+## 🚀 Benefits of This Approach
+
+1. **Security**: Automation can only modify tickets of the authenticated user
+2. **Team Coverage**: Due date alerts cover all team members
+3. **Flexibility**: Easy to add/remove users from monitoring without affecting automation
+4. **Audit Trail**: Clear separation between automated changes and monitoring
+5. **Scalability**: Can monitor any number of users without additional authentication setup
+
+This design ensures that automation stays within proper bounds while providing comprehensive team visibility through alerts and monitoring.
+
+
+# Due Date Alert Feature
+
+## Overview
+This feature automatically checks for JIRA tasks that are due today or tomorrow for configured users and sends alerts to the Discord alerts channel.
+
+## Configuration
+
+### Config.json Settings
+- `"alert_users_at": "1000"` - Time (HHMM format) when to send daily due date alerts (default: 10:00 AM)
+- `"users"` array must contain user objects with:
+  - `"name"`: Display name for the user
+  - `"jira_id"`: The user's JIRA account ID (format: "712020:xxxx-xxxx-xxxx-xxxx")
+
+### Environment Variables
+- `ALERTS_CHANNEL_ID` - Discord channel ID where due date alerts will be sent
+
+## How It Works
+
+1. **Startup Alert**: When the bot starts up, it immediately checks for due tasks and sends alerts
+2. **Daily Schedule**: At the configured time (`alert_users_at`), the system checks for due tasks again
+3. **User Query**: For each user in the config, it queries JIRA for:
+   - All open tasks assigned to that user
+   - Tasks with due dates of today or tomorrow
+   - Excludes closed, done, rejected, resolved, and deployed tasks
+4. **Alert Generation**: If due tasks are found, formatted alerts are sent to the Discord alerts channel
+5. **Smart Timing**: Sends startup alerts immediately, then daily alerts at the configured time
+
+## Alert Format
+
+The Discord alerts include:
+- **User name** and task counts
+- **Tasks due TODAY** (red urgent indicator)
+- **Tasks due TOMORROW** (yellow warning indicator)
+- **Task details**: Key, summary (truncated), priority, and clickable links
+- **Helpful tips** for task management
+
+## JIRA Query Details
+
+The system uses this JQL query for each user:
+```jql
+assignee = "USER_JIRA_ID"
+AND status NOT IN (Closed, Done, Rejected, Resolved, "Deployed to production")
+AND duedate >= "YYYY-MM-DD"  -- today
+AND duedate <= "YYYY-MM-DD"  -- tomorrow
+ORDER BY duedate ASC, priority DESC
+```
+
+## Files Modified
+
+### `/utils/jira.py`
+- Added `get_user_tasks_due_soon(user_jira_id)` - Get due tasks for a specific user
+- Added `get_all_users_tasks_due_soon(user_jira_ids)` - Get due tasks for multiple users
+
+### `/main.py`
+- Added `send_due_date_alerts(due_tasks_by_user, user_config)` - Send formatted Discord alerts
+- Added `check_and_send_due_date_alerts()` to JIRAStatusWorker class
+- Integrated due date checking into the main worker loop
+
+## Testing
+
+Use the included `test_due_dates.py` script to test the functionality:
+```bash
+python test_due_dates.py
+```
+
+This will:
+- Test JIRA connection
+- Query for due tasks
+- Display results without sending Discord alerts
+- Verify the configuration is correct
+
+## Logs
+
+The feature logs its activities:
+- Daily due date check initiation
+- Number of users and tasks found
+- Success/failure of alert sending
+- Error details for troubleshooting
+
+## Example Alert
+
+```
+📅 Due Date Alert for John Doe
+
+🚨 Due TODAY (2 tasks):
+• PROJ-123 - Fix critical login bug... (Priority: High)
+• PROJ-124 - Update user documentation... (Priority: Medium)
+
+⚠️ Due TOMORROW (1 task):
+• PROJ-125 - Code review for new feature... (Priority: Low)
+
+💡 Tip:
+Check your task priorities and plan your day accordingly!
+```
+# Complete Alerting System Summary
+
+## Overview
+The JIRA automation system includes comprehensive alerting functionality with **clear separation between automation and monitoring**:
+
+- **Automation**: Only modifies tickets assigned to the authenticated user (`currentUser()`)
+- **Monitoring**: Checks due dates and sends alerts for all users configured in `config.json`
+
+## 🔐 User Management Approach
+
+### Status Updates (currentUser() only)
+- **Scope**: Only processes tickets assigned to the authenticated user
+- **Authentication**: Uses `ATLASSIAN_EMAIL` and `JIRA_TOKEN` from `.env`
+- **Purpose**: Automatic status changes based on Git activity
+- **Security**: Limited to user's own tickets only
+
+### Due Date Alerts (all config users)
+- **Scope**: Monitors due dates for all users in `config.json`
+- **Configuration**: Uses specific JIRA IDs from config
+- **Purpose**: Team-wide due date notifications
+- **Coverage**: All 8 team members currently configured
+
+## 🚨 Alert Types
+
+### 1. Due Date Alerts
+- **Purpose**: Notify users about tasks due today or tomorrow
+- **Channel**: `ALERTS_CHANNEL_ID` (Discord)
+- **Frequency**: 
+  - **Startup**: Immediately when bot starts
+  - **Daily**: At configured time (`alert_users_at` in config.json)
+- **Configuration**: 
+  - `"alert_users_at": "1000"` (10:00 AM daily)
+  - Users must be configured in `config.json` with JIRA IDs
+
+### 2. Status Change Notifications  
+- **Purpose**: Notify about all JIRA ticket status updates made by the automation
+- **Channel**: `STATUS_CHANGE_CHANNEL_ID` (Discord)
+- **Frequency**: After each status update run
+- **Content**: Shows old status → new status for all updated tickets
+
+### 3. Watched Ticket Alerts
+- **Purpose**: Notify specific users about changes to tickets they're watching
+- **Channel**: `WATCH_CHANNEL_ID` (Discord)  
+- **Frequency**: When watched tickets change status
+- **Content**: Personal notifications with user mentions
+
+### 4. System Logs
+- **Purpose**: Detailed system logging and error reporting
+- **Channel**: `LOGS_CHANNEL_ID` (Discord)
+- **Frequency**: Continuous logging
+- **Content**: System status, errors, and operational details
+
+## 📅 Timing & Schedule
+
+### Due Date Alerts
+```
+Startup: Immediately on bot start
+Daily: At 10:00 AM (configurable via alert_users_at)
+```
+
+### Status Updates & Notifications
+```
+Scheduled runs: 09:00, 12:00, 15:00, 18:00 (configurable via run_on)
+Interval runs: Every 60 minutes (configurable via status_updater_interval)
+```
+
+### Ticket Monitoring
+```
+Watch checks: Every 5 minutes (configurable via watch_interval)
+```
+
+## 🔧 Configuration
+
+### config.json Settings
+```json
+{
+    "users": [
+        {
+            "name": "User Name",
+            "jira_id": "712020:xxxx-xxxx-xxxx-xxxx"
+        }
+    ],
+    "run_on": ["0900", "1200", "1500", "1800"],
+    "alert_users_at": "1000",
+    "watch_interval": 5,
+    "status_updater_interval": 60,
+    "run_status_updater_on_interval": true
+}
+```
+
+### .env Settings
+```bash
+# Discord Channel IDs
+ALERTS_CHANNEL_ID="1417762995081318450"      # Due date alerts
+STATUS_CHANGE_CHANNEL_ID="1417861837126373417" # Status changes  
+WATCH_CHANNEL_ID="1417762949900275764"        # Watched tickets
+LOGS_CHANNEL_ID="1417762921836187681"         # System logs
+```
+
+## 🎯 Alert Flow
+
+### Startup Sequence
+1. Bot starts and connects to Discord
+2. **Immediate due date check and alerts sent**
+3. Worker loop begins
+4. Ticket monitoring starts
+
+### Daily Operations
+1. Status updates run at scheduled times (09:00, 12:00, 15:00, 18:00)
+2. Status change notifications sent after each update
+3. Due date alerts sent daily at 10:00 AM
+4. Watched ticket alerts sent when changes detected
+5. System logs sent continuously
+
+### Alert Smart Logic
+- **Due dates**: Startup + daily at configured time
+- **Status changes**: Only when actual status updates occur
+- **Watched tickets**: Only for tickets with active watchers
+- **Logs**: Continuous with buffering and error handling
+
+## 📱 Discord Message Formats
+
+### Due Date Alert
+```
+📅 Due Date Alert for John Doe
+
+🚨 Due TODAY (2 tasks):
+• [PROJ-123](link) - Fix critical bug... (Priority: High)
+
+⚠️ Due TOMORROW (1 task):  
+• [PROJ-124](link) - Code review... (Priority: Medium)
+
+💡 Tip: Check your task priorities and plan your day accordingly!
+```
+
+### Status Change Notification
+```
+🔄 JIRA Status Update Summary
+
+📋 Issues Updated (3):
+• [PROJ-123](link): Open → In Progress
+• [PROJ-124](link): In Progress → Dev Testing  
+
+🐛 Bugs Updated (1):
+• [BUG-456](link): Backlog → In Progress
+
+📊 Summary: Total tickets updated: 4 | Issues: 3 | Bugs: 1
+🤖 Automation: Updates triggered by Git activity detection
+```
+
+### Watched Ticket Alert  
+```
+⚡ Automated Status Update! @user1 @user2
+
+Automated Update: PROJ-123
+[View Ticket](link)
+
+Automated Change: • Status: Open → In Progress
+👥 Watching Users (2): user1, user2  
+🔧 Update Source: Hourly Worker (based on Git activity)
+```
+
+## 🛠️ Technical Implementation
+
+### Files Modified
+- `main.py`: Core alerting logic and Discord integration
+- `utils/jira.py`: Due date querying methods
+- `config.json`: User and timing configuration
+- `.env`: Discord channel configuration
+
+### Key Functions Added
+- `send_due_date_alerts()`: Due date Discord notifications
+- `send_status_change_notifications()`: Status change Discord notifications  
+- `check_and_send_due_date_alerts()`: Due date checking orchestration
+- `get_user_tasks_due_soon()`: JIRA API for user due dates
+- `get_all_users_tasks_due_soon()`: Multi-user due date queries
+
+### Startup vs Daily Alert Logic
+- `startup_alerts_sent` flag prevents duplicate startup alerts
+- Daily alerts use time-based checking with 1-minute tolerance  
+- Smart logic prevents conflicts between startup and daily alerts
+
+## 🔍 Monitoring & Troubleshooting
+
+### Log Messages to Watch For
+- "Sending due date alerts at startup"  
+- "Sending daily due date alerts at HH:MM"
+- "Sent status change notification for X tickets"
+- Discord permission errors
+- JIRA connection issues
+
+### Common Issues
+- Missing Discord channel permissions
+- Invalid JIRA user IDs in config
+- Network connectivity problems
+- Discord rate limiting
+
+### Testing
+- Use `test_due_dates.py` for due date functionality
+- Use `test_status_notifications.py` for status change format
+- Monitor Discord channels for actual message delivery
+- Check system logs for error details
+
+This comprehensive alerting system ensures users stay informed about their JIRA tasks through multiple notification channels with appropriate timing and context.
+
+
+
 ## Contributing
 
 1. Fork the repository

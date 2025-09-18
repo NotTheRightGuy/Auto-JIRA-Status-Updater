@@ -1,5 +1,6 @@
 # Environment variables
 .env
+.venv
 
 # Log files
 *.log
@@ -37,3 +38,4 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+log.txt

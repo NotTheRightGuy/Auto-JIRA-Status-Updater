@@ -4,7 +4,6 @@ import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Set
 from dataclasses import dataclass, asdict
-import os
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +116,29 @@ class DatabaseManager:
                 cursor.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_watchers_user_id ON watchers(user_id)
+                """
+                )
+
+                # Create reminders table
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS reminders (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER NOT NULL,
+                        username TEXT NOT NULL,
+                        message TEXT NOT NULL,
+                        reminder_time TIMESTAMP NOT NULL,
+                        channel_id INTEGER NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        sent BOOLEAN DEFAULT FALSE
+                    )
+                """
+                )
+
+                # Create index for reminder queries
+                cursor.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_reminders_time ON reminders(reminder_time, sent)
                 """
                 )
 
@@ -383,4 +405,130 @@ class DatabaseManager:
 
         except sqlite3.Error as e:
             logger.error(f"Error backing up database: {e}")
+            return False
+
+    def add_reminder(
+        self,
+        user_id: int,
+        username: str,
+        message: str,
+        reminder_time: datetime,
+        channel_id: int,
+    ) -> bool:
+        """Add a new reminder to the database."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO reminders (user_id, username, message, reminder_time, channel_id)
+                    VALUES (?, ?, ?, ?, ?)
+                """,
+                    (user_id, username, message, reminder_time.isoformat(), channel_id),
+                )
+                conn.commit()
+                logger.info(f"Added reminder for user {user_id} at {reminder_time}")
+                return True
+
+        except sqlite3.Error as e:
+            logger.error(f"Error adding reminder: {e}")
+            return False
+
+    def get_due_reminders(self) -> List[Dict]:
+        """Get all reminders that are due and haven't been sent."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                current_time = datetime.now().isoformat()
+
+                cursor.execute(
+                    """
+                    SELECT id, user_id, username, message, reminder_time, channel_id 
+                    FROM reminders 
+                    WHERE reminder_time <= ? AND sent = FALSE
+                    ORDER BY reminder_time
+                """,
+                    (current_time,),
+                )
+
+                reminders = []
+                for row in cursor.fetchall():
+                    reminders.append(
+                        {
+                            "id": row[0],
+                            "user_id": row[1],
+                            "username": row[2],
+                            "message": row[3],
+                            "reminder_time": datetime.fromisoformat(row[4]),
+                            "channel_id": row[5],
+                        }
+                    )
+
+                return reminders
+
+        except sqlite3.Error as e:
+            logger.error(f"Error getting due reminders: {e}")
+            return []
+
+    def mark_reminder_sent(self, reminder_id: int) -> bool:
+        """Mark a reminder as sent."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE reminders SET sent = TRUE WHERE id = ?", (reminder_id,)
+                )
+                conn.commit()
+                return True
+
+        except sqlite3.Error as e:
+            logger.error(f"Error marking reminder as sent: {e}")
+            return False
+
+    def get_user_reminders(self, user_id: int) -> List[Dict]:
+        """Get all pending reminders for a user."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT id, message, reminder_time 
+                    FROM reminders 
+                    WHERE user_id = ? AND sent = FALSE
+                    ORDER BY reminder_time
+                """,
+                    (user_id,),
+                )
+
+                reminders = []
+                for row in cursor.fetchall():
+                    reminders.append(
+                        {
+                            "id": row[0],
+                            "message": row[1],
+                            "reminder_time": datetime.fromisoformat(row[2]),
+                        }
+                    )
+
+                return reminders
+
+        except sqlite3.Error as e:
+            logger.error(f"Error getting user reminders: {e}")
+            return []
+
+    def delete_reminder(self, reminder_id: int, user_id: int) -> bool:
+        """Delete a reminder if it belongs to the user."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "DELETE FROM reminders WHERE id = ? AND user_id = ? AND sent = FALSE",
+                    (reminder_id, user_id),
+                )
+                rows_affected = cursor.rowcount
+                conn.commit()
+                return rows_affected > 0
+
+        except sqlite3.Error as e:
+            logger.error(f"Error deleting reminder: {e}")
             return False

@@ -36,7 +36,7 @@ class DetailedFormatter(logging.Formatter):
 logging.basicConfig(
     level=logging.DEBUG,  # Set to DEBUG for maximum detail
     handlers=[
-        logging.FileHandler("all.log", mode="a", encoding="utf-8"),
+        logging.FileHandler("logs/all.log", mode="a", encoding="utf-8"),
     ],
     format="%(message)s",  # We'll use our custom formatter
 )
@@ -45,11 +45,3 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 for handler in logging.root.handlers:
     handler.setFormatter(DetailedFormatter())
-
-# Add separation line for new session
-session_start = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-with open("log.txt", "a", encoding="utf-8") as f:
-    f.write(f"\n{'='*80}\n")
-    f.write(f"New session started at {session_start}\n")
-    f.write(f"Process ID: {os.getpid()}\n")
-    f.write(f"{'='*80}\n\n")

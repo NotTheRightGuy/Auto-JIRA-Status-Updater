@@ -321,6 +321,16 @@ ORDER BY "end date[date]" ASC, priority DESC
                     "transition": "Move to Done",
                     "to_status": "Done",
                 },
+                {
+                    "from_status": "Dev Testing",
+                    "transition": "Developer level testing - Reopen",
+                    "to_status": "In Progress",
+                },
+                {
+                    "from_status": "In Progress",
+                    "transition": "Move for code review",
+                    "to_status": "In Review",
+                },
             ]
 
         try:

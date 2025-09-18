@@ -966,127 +966,116 @@ class JIRAStatusWorker:
         run_times = config.get("run_on", ["1000"])
         status_interval_minutes = config.get("status_updater_interval", 60)
         run_on_interval = config.get("run_status_updater_on_interval", True)
+        alert_time_str = config.get("alert_users_at", "1000")
 
         logger.info("JIRA Status Worker started")
         logger.info(f"Scheduled run times: {', '.join(run_times)}")
+        logger.info(f"Alert time: {alert_time_str}")
         if run_on_interval:
             logger.info(f"Additional runs every {status_interval_minutes} minutes")
         else:
             logger.info("Interval-based updates disabled")
         logger.debug(
-            f"Worker configuration - run_times: {run_times}, interval: {status_interval_minutes}, run_on_interval: {run_on_interval}"
+            f"Worker configuration - run_times: {run_times}, interval: {status_interval_minutes}, run_on_interval: {run_on_interval}, alert_time: {alert_time_str}"
         )
 
-        last_scheduled_run = None
+        # Track execution times to prevent duplicates
+        last_scheduled_runs = {}  # Track last run for each scheduled time
         last_interval_run = None
-        startup_alerts_sent = False  # Track if startup alerts have been sent
+        last_alert_sent = None
+        startup_completed = False
 
         while True:
             try:
                 await self.discord_client.wait_until_ready()
                 now = datetime.now()
 
-                # Send due date alerts at startup (only once)
-                if not startup_alerts_sent:
-                    logger.info("Sending due date alerts at startup")
+                # Run startup tasks only once
+                if not startup_completed:
+                    logger.info(
+                        "Running startup tasks: status update and due date alerts"
+                    )
+                    # Run status update on startup
+                    asyncio.create_task(self._run_status_update_background())
+                    # Send due date alerts on startup
                     await self.check_and_send_due_date_alerts()
-                    startup_alerts_sent = True
-                    # Initialize last_alert_sent to prevent immediate duplicate daily alert
-                    self.last_alert_sent = now
-                    logger.info("Startup due date alerts sent successfully")
+                    last_alert_sent = now
+                    startup_completed = True
+                    logger.info("Startup tasks completed successfully")
 
-                # Check if we should run based on scheduled times
+                # Check for scheduled status updates
                 should_run_scheduled = False
-                next_scheduled = get_next_scheduled_run(run_times)
-
-                # Check if it's time for a scheduled run (within 1 minute tolerance)
                 for time_str in run_times:
                     try:
                         scheduled_time = parse_time_string(time_str)
                         today_scheduled = datetime.combine(now.date(), scheduled_time)
 
-                        # Check if we're within 1 minute of scheduled time and haven't run today
+                        # Check if we're within 1 minute of scheduled time
                         time_diff = abs((now - today_scheduled).total_seconds())
-                        if time_diff <= 60 and (
-                            last_scheduled_run is None
-                            or last_scheduled_run.date() < now.date()
-                            or abs(
-                                (last_scheduled_run - today_scheduled).total_seconds()
-                            )
-                            > 300
-                        ):
+
+                        # Check if we haven't run this specific time slot today
+                        last_run_for_time = last_scheduled_runs.get(time_str)
+                        time_slot_not_run_today = (
+                            last_run_for_time is None
+                            or last_run_for_time.date() < now.date()
+                        )
+
+                        if time_diff <= 60 and time_slot_not_run_today:
                             should_run_scheduled = True
-                            last_scheduled_run = now
+                            last_scheduled_runs[time_str] = now
                             logger.info(
-                                f"Running scheduled update at {now.strftime('%H:%M')}"
-                            )
-                            logger.debug(
-                                f"Scheduled run triggered by time slot: {time_str}"
+                                f"Running scheduled status update at {now.strftime('%H:%M')} (slot: {time_str})"
                             )
                             break
-                    except ValueError:
+                    except ValueError as e:
+                        logger.error(f"Invalid time format '{time_str}' in config: {e}")
                         continue
 
-                # Check if we should run based on interval (only if enabled)
+                # Check for interval-based status updates (only if enabled and no scheduled run)
                 should_run_interval = False
-                if run_on_interval and (
-                    last_interval_run is None
-                    or (now - last_interval_run).total_seconds()
-                    >= status_interval_minutes * 60
+                if (
+                    run_on_interval
+                    and not should_run_scheduled
+                    and startup_completed  # Only after startup
+                    and (
+                        last_interval_run is None
+                        or (now - last_interval_run).total_seconds()
+                        >= status_interval_minutes * 60
+                    )
                 ):
                     should_run_interval = True
                     last_interval_run = now
-                    if not should_run_scheduled:
-                        logger.info(
-                            f"Running interval update ({status_interval_minutes} min interval)"
-                        )
-                        logger.debug(
-                            f"Interval run triggered - last run was {(now - last_interval_run).total_seconds():.0f} seconds ago"
-                        )
-
-                # Run the update if needed
-                if should_run_scheduled or should_run_interval:
-                    logger.debug(
-                        "Starting status update and backup sequence as background task"
+                    logger.info(
+                        f"Running interval status update ({status_interval_minutes} min interval)"
                     )
-                    # Create background task to prevent blocking the Discord bot
+
+                # Execute status update if needed
+                if should_run_scheduled or should_run_interval:
+                    logger.debug("Starting status update as background task")
                     asyncio.create_task(self._run_status_update_background())
 
-                # Check if we should send due date alerts (daily at configured time)
-                alert_time_str = config.get("alert_users_at", "1000")
+                # Check for due date alerts (daily at configured time)
                 try:
                     alert_time = parse_time_string(alert_time_str)
                     today_alert_time = datetime.combine(now.date(), alert_time)
 
-                    # Check if we're within 1 minute of alert time and haven't sent daily alerts today
+                    # Check if we're within 1 minute of alert time and haven't sent alerts today
                     alert_time_diff = abs((now - today_alert_time).total_seconds())
-                    should_send_daily_alerts = (
-                        alert_time_diff <= 60
-                        and startup_alerts_sent  # Only send daily alerts after startup alerts
+                    should_send_alerts = (
+                        startup_completed  # Only after startup
+                        and alert_time_diff <= 60
                         and (
-                            not hasattr(self, "last_alert_sent")
-                            or self.last_alert_sent is None
-                            or self.last_alert_sent.date() < now.date()
-                            or
-                            # Allow daily alert if startup was today but it's now the configured alert time
-                            (
-                                self.last_alert_sent.date() == now.date()
-                                and abs(
-                                    (
-                                        self.last_alert_sent - today_alert_time
-                                    ).total_seconds()
-                                )
-                                > 300
-                            )
+                            last_alert_sent is None
+                            or last_alert_sent.date() < now.date()
                         )
                     )
 
-                    if should_send_daily_alerts:
+                    if should_send_alerts:
                         logger.info(
                             f"Sending daily due date alerts at {now.strftime('%H:%M')}"
                         )
                         await self.check_and_send_due_date_alerts()
-                        self.last_alert_sent = now
+                        last_alert_sent = now
                         logger.debug(
                             f"Daily due date alerts sent, next alert will be tomorrow at {alert_time_str}"
                         )
@@ -1102,6 +1091,8 @@ class JIRAStatusWorker:
                 # Calculate sleep time until next check (check every minute for scheduled times)
                 sleep_time = 60  # Check every minute for precision
 
+                # Calculate next scheduled time for logging
+                next_scheduled = get_next_scheduled_run(run_times)
                 logger.debug(
                     f"Next check in {sleep_time} seconds. Next scheduled: {next_scheduled.strftime('%Y-%m-%d %H:%M')}"
                 )
