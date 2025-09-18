@@ -6,8 +6,7 @@ from discord.ext import commands
 from discord import app_commands
 import json
 from datetime import datetime, timedelta, time, timezone
-from typing import Dict, List, Set
-import sys
+from typing import Dict, List
 from dotenv import load_dotenv
 from services.jira import JIRA, JIRAWatcherBot
 from services.bitbucket import Bitbucket
