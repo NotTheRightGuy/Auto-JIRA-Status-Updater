@@ -2,6 +2,11 @@ import logging
 import os
 import asyncio
 import discord
+import logging
+import os
+import asyncio
+import discord
+import json
 from datetime import datetime
 from dotenv import load_dotenv
 from services.jira import JIRA
@@ -9,10 +14,22 @@ from services.bitbucket import Bitbucket
 from logs.logger import logger
 from utils.helper import process_issue
 from services.database import DatabaseManager
+from utils.timezone import IST, get_ist_now, format_ist_datetime
 
 import json
 
 load_dotenv()
+
+
+class ISTFormatter(logging.Formatter):
+    """Custom formatter that shows time in IST timezone."""
+
+    def formatTime(self, record, datefmt=None):
+        """Format time in IST timezone."""
+        dt = get_ist_now()
+        if datefmt:
+            return dt.strftime(datefmt)
+        return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
 class DiscordLogHandler(logging.Handler):
@@ -113,7 +130,7 @@ class JIRAStatusWorker:
             )
 
             # Set up formatter
-            formatter = logging.Formatter(
+            formatter = ISTFormatter(
                 "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
             )
             self.discord_handler.setFormatter(formatter)
@@ -133,9 +150,9 @@ class JIRAStatusWorker:
 
     async def run_status_update(self):
         """Run the JIRA status update process."""
-        start_time = datetime.now()
+        start_time = get_ist_now()
         logger.info("Starting JIRA status update process")
-        logger.info(f"Update initiated at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"Update initiated at: {format_ist_datetime(start_time)}")
 
         try:
             # Initialize clients
@@ -263,7 +280,7 @@ class JIRAStatusWorker:
                     logger.error(f"Error processing bug {bug.key}: {str(e)}")
 
             # Summary
-            end_time = datetime.now()
+            end_time = get_ist_now()
             duration = end_time - start_time
 
             logger.info("JIRA Status Update Summary:")
@@ -332,7 +349,7 @@ class JIRAStatusWorker:
 
     async def backup_database_if_needed(self):
         """Backup database if it hasn't been backed up in the last 24 hours."""
-        now = datetime.now()
+        now = get_ist_now()
 
         # Check if we need to backup (daily)
         if (
@@ -367,7 +384,7 @@ class JIRAStatusWorker:
             if not os.path.exists(backup_dir):
                 return
 
-            cutoff_time = datetime.now().timestamp() - (7 * 24 * 3600)  # 7 days ago
+            cutoff_time = get_ist_now().timestamp() - (7 * 24 * 3600)  # 7 days ago
             removed_count = 0
 
             for filename in os.listdir(backup_dir):
