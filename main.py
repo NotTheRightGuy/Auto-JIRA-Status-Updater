@@ -988,9 +988,30 @@ class JIRAStatusWorker:
                     )
                     # Run status update on startup
                     asyncio.create_task(self._run_status_update_background())
-                    # Send due date alerts on startup
-                    await self.check_and_send_due_date_alerts()
-                    last_alert_sent = now
+
+                    # Only send due date alerts on startup if we're within the configured alert window.
+                    # This prevents marking the day's alerts as already sent when the bot starts
+                    # earlier than the configured alert time (e.g., start at 09:00 but alert at 15:30).
+                    try:
+                        alert_time = parse_time_string(alert_time_str)
+                        today_alert_time = datetime.combine(now.date(), alert_time)
+                        alert_time_diff = abs((now - today_alert_time).total_seconds())
+
+                        if alert_time_diff <= 60:
+                            # We're within the alert minute window, send alerts and mark as sent
+                            await self.check_and_send_due_date_alerts()
+                            last_alert_sent = now
+                            logger.info(
+                                "Due date alerts sent on startup (within alert window)"
+                            )
+                        else:
+                            # Skip sending alerts on startup; scheduled check will handle it at the configured time
+                            logger.info(
+                                "Skipping due date alerts on startup (outside configured alert time)"
+                            )
+                    except Exception as e:
+                        logger.error(f"Error checking alert time on startup: {e}")
+
                     startup_completed = True
                     logger.info("Startup tasks completed successfully")
 
