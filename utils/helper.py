@@ -9,7 +9,7 @@ def determine_new_status(
     current_status: str,
     branch_exists: bool,
     pr_exists: bool,
-    pr_merged: bool,
+    all_pr_merged: bool,
     is_bug: bool = False,
     is_story: bool = False,
 ) -> Optional[str]:
@@ -32,7 +32,7 @@ def determine_new_status(
         logger.debug(f"No branch found, keeping current status: {current_status}")
         return None
 
-    if pr_exists and pr_merged:
+    if pr_exists and all_pr_merged:
         # Branch exists, PR exists and is merged
         if is_bug:
             # For bugs: merged PR -> Resolved
@@ -44,33 +44,10 @@ def determine_new_status(
             if current_status != "Dev Testing":
                 logger.info(f"PR merged for issue, changing status to 'Dev Testing'")
                 return "Dev Testing"
+
     elif pr_exists:
-        # Branch exists, PR exists but not merged
-        if current_status == "Dev Testing":
-            # Special case: If in Dev Testing with unmerged PR, move back to appropriate status
-            if is_story:
-                # For stories: Dev Testing -> In Progress (since stories don't have In Review)
-                logger.info(
-                    f"Dev Testing status with unmerged PR found for story, moving back to 'In Progress'"
-                )
-                return "In Progress"
-            else:
-                # For regular issues: Dev Testing -> In Review
-                logger.info(
-                    f"Dev Testing status with unmerged PR found, moving back to 'In Review'"
-                )
-                return "In Review"
-        elif current_status not in ["In Review", "Dev Testing", "Performing DevTesing"]:
-            if is_story:
-                # Stories don't typically have "In Review" status, keep current or move to In Progress
-                if current_status != "In Progress":
-                    logger.info(
-                        f"Open PR found for story, changing status to 'In Progress'"
-                    )
-                    return "In Progress"
-            else:
-                logger.info(f"Open PR found, changing status to 'In Review'")
-                return "In Review"
+        return "In Review"
+
     else:
         # Branch exists but no PR -> In Progress
         valid_statuses = ["In Progress", "In Review", "Dev Testing", "Done"]
@@ -114,7 +91,7 @@ async def process_issue(
 
     branch_found = False
     pr_found = False
-    pr_merged = False
+    all_pr_merged = False
 
     for repo in repos:
         logger.debug(f"Checking repository: {repo}")
@@ -127,29 +104,31 @@ async def process_issue(
 
             # Check for PRs
             prs = bitbucket.find_prs(repo, issue.key)
-            if prs:
+            n_prs = len(prs)
+            total_pr_merged = 0
+
+            if n_prs > 0:
                 pr_found = True
+                total_pr_merged = 0
                 for pr in prs:
                     logger.info(
                         f"PR found: {pr['links']['html']['href']}, Status: {pr['state']}"
                     )
                     if pr["state"] == "MERGED":
-                        pr_merged = True
-                        break
-
-                # If we found a merged PR, no need to check more repositories
-                if pr_merged:
-                    break
+                        total_pr_merged += 1
+                if total_pr_merged == n_prs:
+                    all_pr_merged = True
             else:
                 logger.debug(f"No PRs found for {issue.key} in {repo}")
 
-        # If we found a merged PR, no need to check more repositories
-        if pr_merged:
-            break
-
     # Determine if status change is needed
     new_status = determine_new_status(
-        issue.fields.status.name, branch_found, pr_found, pr_merged, is_bug, is_story
+        issue.fields.status.name,
+        branch_found,
+        pr_found,
+        all_pr_merged,
+        is_bug,
+        is_story,
     )
 
     child_status_changed = False
@@ -178,6 +157,7 @@ async def process_issue(
     else:
         logger.info(f"No status change needed for {issue.key}")
 
+    # TODO  This logic is wrong, take a look at it again
     # Update parent status if child status changed
     try:
         # Use async version if available, otherwise fall back to sync
@@ -244,6 +224,11 @@ def parse_time_string(time_str: str) -> time:
     Returns:
         datetime.time object
     """
+    if isinstance(time_str, int):
+        time_str = str(time_str).strip()
+    elif not isinstance(time_str, str):
+        raise ValueError(f"Time must be a string or integer, got {type(time_str)}")
+
     if len(time_str) == 3:  # e.g., '900' for 9:00 AM
         time_str = "0" + time_str
     elif len(time_str) != 4:

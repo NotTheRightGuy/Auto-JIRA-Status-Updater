@@ -76,8 +76,8 @@ class DiscordLogHandler(logging.Handler):
         try:
             channel = self.discord_client.get_channel(self.channel_id)
             if not channel:
-                print(
-                    f"Warning: Could not find Discord channel with ID {self.channel_id}"
+                logger.error(
+                    f"Could not find Discord channel with ID {self.channel_id} "
                 )
                 return
 
@@ -86,9 +86,6 @@ class DiscordLogHandler(logging.Handler):
 
             # Calculate maximum chunk size accounting for formatting overhead
             header_single = "📊 JIRA Status Updater Log\n" + "-" * 50 + "\n"
-            header_multi = (
-                "📊 JIRA Status Updater Log (Part {}/{}) \n" + "-" * 50 + "\n"
-            )
             code_block_overhead = 8  # ``` at start and end
             max_content_size = (
                 2000 - len(header_single) - code_block_overhead - 50
@@ -130,13 +127,7 @@ class DiscordLogHandler(logging.Handler):
             # Send each chunk with length validation
             for i, chunk in enumerate(chunks):
                 try:
-                    if len(chunks) > 1:
-                        message = f"```\n📊 JIRA Status Updater Log (Part {i+1}/{len(chunks)})\n{'-'*50}\n{chunk}\n```"
-                    else:
-                        message = (
-                            f"```\n📊 JIRA Status Updater Log\n{'-'*50}\n{chunk}\n```"
-                        )
-
+                    message = f"```\n📊 JIRA Status Updater Log (Part {i+1}/{len(chunks)})\n{'-'*50}\n{chunk}\n```"
                     # Final safety check
                     if len(message) > 2000:
                         logger.error(
@@ -157,15 +148,13 @@ class DiscordLogHandler(logging.Handler):
 
                 except discord.HTTPException as e:
                     logger.error(f"Discord API error sending log chunk {i+1}: {e}")
-                    # Try sending a simplified error message
                     try:
                         await channel.send(
-                            f"❌ Error sending log chunk {i+1}/{len(chunks)}: Message too long ({len(message) if 'message' in locals() else 'unknown'} chars)"
+                            f"Error sending log chunk {i+1}/{len(chunks)}: Message too long ({len(message) if 'message' in locals() else 'unknown'} chars)"
                         )
                     except Exception:
-                        pass  # If even the error message fails, give up
+                        pass
 
-            # Clear buffer after sending
             self.log_buffer.clear()
 
         except Exception as e:
@@ -967,8 +956,8 @@ class JIRAStatusWorker:
         logger.info("Initializing JIRA Status Worker main loop")
         run_times = config.get("run_on", ["1000"])
         status_interval_minutes = config.get("status_updater_interval", 60)
-        run_on_interval = config.get("run_status_updater_on_interval", True)
-        alert_time_str = config.get("alert_users_at", "1000")
+        run_on_interval = config.get("run_status_updater_on_interval", False)
+        alert_time_str = str(config.get("alert_users_at", "1000"))
 
         logger.info("JIRA Status Worker started")
         logger.info(f"Scheduled run times: {', '.join(run_times)}")
@@ -1604,22 +1593,12 @@ async def on_ready():
     client.loop.create_task(check_reminders())
     client.loop.create_task(worker.worker_loop())
 
-    logger.info("Bot is ready and all systems operational!")
-
 
 # Slash Commands
 @client.tree.command(name="ping", description="Check bot latency")
-async def ping_slash(interaction: discord.Interaction):
+async def ping(interaction: discord.Interaction):
     latency_ms = round(client.latency * 1000, 2)
     await interaction.response.send_message(f"Pong! Latency: {latency_ms}ms")
-
-
-# Prefix Commands
-@client.command(name="ping")
-async def ping_prefix(ctx):
-    """Check bot latency using prefix command."""
-    latency_ms = round(client.latency * 1000, 2)
-    await ctx.send(f"Pong! Latency: {latency_ms}ms")
 
 
 @client.tree.command(
@@ -1675,52 +1654,6 @@ async def watch_ticket(interaction: discord.Interaction, ticket_id: str):
         )
 
 
-@client.command(name="watch")
-async def watch_prefix(ctx, ticket_id: str):
-    """Start watching a JIRA ticket for changes using prefix command."""
-    ticket_id = ticket_id.upper()
-    logger.info(
-        f"User {ctx.author.id} ({ctx.author.name}) attempting to watch ticket {ticket_id} via prefix command"
-    )
-
-    # Validate ticket format (basic check)
-    if "-" not in ticket_id:
-        logger.warning(
-            f"Invalid ticket format provided by user {ctx.author.id}: {ticket_id}"
-        )
-        await ctx.send("Invalid ticket format. Use format like: ABC-123")
-        return
-
-    # Try to add watcher
-    success = watcher.add_watcher(ticket_id, ctx.author)
-
-    if success:
-        logger.info(
-            f"Successfully added watcher for {ticket_id} by user {ctx.author.id}"
-        )
-        embed = discord.Embed(
-            title="Watching ticket",
-            description=f"You are now watching **{ticket_id}** for changes.",
-            color=0x00FF00,
-        )
-        embed.add_field(
-            name="What you'll be notified about:",
-            value="• Status changes\n• Summary changes\n• Description changes\n• Assignee changes",
-            inline=False,
-        )
-        embed.add_field(
-            name="How to stop watching:",
-            value=f"`unwatch {ticket_id}` or `/unwatch {ticket_id}`",
-            inline=False,
-        )
-        await ctx.send(embed=embed)
-    else:
-        logger.warning(f"Failed to add watcher for {ticket_id} by user {ctx.author.id}")
-        await ctx.send(
-            f"Could not watch ticket **{ticket_id}**. Please check if the ticket exists and try again."
-        )
-
-
 @client.tree.command(name="unwatch", description="Stop watching a JIRA ticket")
 @app_commands.describe(ticket_id="The JIRA ticket ID to stop watching")
 async def unwatch_ticket(interaction: discord.Interaction, ticket_id: str):
@@ -1742,25 +1675,6 @@ async def unwatch_ticket(interaction: discord.Interaction, ticket_id: str):
         await interaction.response.send_message(
             f"You were not watching **{ticket_id}**.", ephemeral=True
         )
-
-
-@client.command(name="unwatch")
-async def unwatch_prefix(ctx, ticket_id: str):
-    """Stop watching a JIRA ticket using prefix command."""
-    ticket_id = ticket_id.upper()
-    logger.info(
-        f"User {ctx.author.id} ({ctx.author.name}) attempting to unwatch ticket {ticket_id} via prefix command"
-    )
-    success = watcher.remove_watcher(ticket_id, ctx.author.id)
-
-    if success:
-        logger.info(
-            f"Successfully removed watcher for {ticket_id} by user {ctx.author.id}"
-        )
-        await ctx.send(f"You are no longer watching **{ticket_id}**.")
-    else:
-        logger.info(f"User {ctx.author.id} was not watching {ticket_id}")
-        await ctx.send(f"You were not watching **{ticket_id}**.")
 
 
 @client.tree.command(
@@ -1797,37 +1711,6 @@ async def list_tickets(interaction: discord.Interaction):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@client.command(name="list")
-async def list_prefix(ctx):
-    """List all tickets you're currently watching using prefix command."""
-    logger.info(
-        f"User {ctx.author.id} ({ctx.author.name}) requested list of watched tickets via prefix command"
-    )
-    watched_tickets = watcher.get_watched_tickets_for_user(ctx.author.id)
-
-    if not watched_tickets:
-        logger.debug(f"User {ctx.author.id} is not watching any tickets")
-        await ctx.send("You are not watching any tickets.")
-    else:
-        logger.debug(
-            f"User {ctx.author.id} is watching {len(watched_tickets)} tickets: {watched_tickets}"
-        )
-        embed = discord.Embed(
-            title="Your watched tickets",
-            description=f"You are watching {len(watched_tickets)} ticket(s):",
-            color=0x0099FF,
-        )
-
-        tickets_text = "\n".join(
-            [
-                f"• [{ticket}]({jira_client.host}/browse/{ticket})"
-                for ticket in watched_tickets
-            ]
-        )
-        embed.add_field(name="Tickets:", value=tickets_text, inline=False)
-        await ctx.send(embed=embed)
-
-
 @client.tree.command(name="stats", description="Show database statistics")
 async def show_stats(interaction: discord.Interaction):
     stats = db_manager.get_database_stats()
@@ -1850,66 +1733,25 @@ async def show_stats(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
-@client.command(name="stats")
-async def stats_prefix(ctx):
-    """Show database statistics using prefix command."""
-    stats = db_manager.get_database_stats()
-
-    embed = discord.Embed(
-        title="📊 Database Statistics",
-        description="Current system statistics",
-        color=0x9932CC,
-    )
-
-    embed.add_field(
-        name="👥 Total Watchers", value=stats["total_watchers"], inline=True
-    )
-    embed.add_field(name="🆔 Unique Users", value=stats["unique_users"], inline=True)
-    embed.add_field(
-        name="🎫 Watched Tickets", value=stats["watched_tickets"], inline=True
-    )
-    embed.add_field(name="📸 Snapshots", value=stats["snapshots"], inline=True)
-
-    await ctx.send(embed=embed)
-
-
 @client.tree.command(
     name="delete", description="Delete the last n messages from the channel"
 )
 async def delete_messages(interaction: discord.Interaction, n: int):
     if not interaction.user.guild_permissions.manage_messages:
         await interaction.response.send_message(
-            "You do not have permission to delete messages.", ephemeral=True
+            "You do not have the permission to delete messages.", ephemeral=True
         )
         return
 
-    if n < 1 or n > 100:
+    if n < 1 or n > 500:
         await interaction.response.send_message(
-            "Please provide a number between 1 and 100.", ephemeral=True
+            "Please provide a number between 1 and 500.", ephemeral=True
         )
         return
 
-    deleted = await interaction.channel.purge(
-        limit=n + 1
-    )  # +1 to include the command message
-    await interaction.response.send_message(
-        f"Deleted {len(deleted)-1} message(s).", ephemeral=True
-    )
-
-
-@client.command(name="delete")
-async def delete_prefix(ctx, n: int):
-    """Delete the last n messages from the channel using prefix command."""
-    if not ctx.author.guild_permissions.manage_messages:
-        await ctx.send("You do not have permission to delete messages.")
-        return
-
-    if n < 1 or n > 100:
-        await ctx.send("Please provide a number between 1 and 100.")
-        return
-
-    deleted = await ctx.channel.purge(limit=n + 1)  # +1 to include the command message
-    await ctx.send(f"Deleted {len(deleted)-1} message(s).", delete_after=5)
+    await interaction.response.defer(ephemeral=True)
+    deleted = await interaction.channel.purge(limit=n)
+    await interaction.followup.send(f"Deleted {len(deleted)} messages(s)")
 
 
 @client.tree.command(
@@ -1997,107 +1839,6 @@ async def remind_command(
         )
 
 
-@client.command(name="remind")
-async def remind_prefix(ctx, date: str, *, args: str):
-    """Set a reminder for a specific date and time using prefix command.
-
-    Usage: remind <date> <message> [time]
-    Examples:
-    - remind today Meeting at 3 PM 15:00
-    - remind tomorrow Call client
-    - remind 25/12/2023 Christmas party
-    """
-    # Parse the arguments to separate message and optional time
-    parts = args.split()
-    if not parts:
-        await ctx.send("❌ Please provide a message for the reminder.")
-        return
-
-    # Try to find time in the last part (HH:MM format)
-    time_part = None
-    message_parts = parts
-
-    if len(parts) > 1 and ":" in parts[-1]:
-        # Check if last part looks like time (HH:MM)
-        potential_time = parts[-1]
-        if len(potential_time) == 5 and potential_time[2] == ":":
-            try:
-                hours, minutes = potential_time.split(":")
-                if 0 <= int(hours) <= 23 and 0 <= int(minutes) <= 59:
-                    time_part = potential_time
-                    message_parts = parts[:-1]
-            except ValueError:
-                pass  # Not a valid time, include in message
-
-    message = " ".join(message_parts)
-
-    logger.info(
-        f"User {ctx.author.id} ({ctx.author.name}) setting reminder for {date} {time_part or 'current time'}: {message[:50]}... via prefix command"
-    )
-
-    # Parse the reminder date and time
-    reminder_datetime = parse_reminder_date(date, time_part)
-
-    if not reminder_datetime:
-        await ctx.send(
-            "❌ Invalid date or time format. Use formats like:\n"
-            "• Date: `today`, `tomorrow`, `tmrw`, or `dd/mm/yyyy`\n"
-            "• Time: `HH:MM` (24-hour format, optional)"
-        )
-        return
-
-    # Get reminder channel ID from environment
-    reminder_channel_id = os.getenv("REMINDER_CHANNEL_ID")
-    if not reminder_channel_id:
-        logger.error("REMINDER_CHANNEL_ID not set in environment variables")
-        await ctx.send(
-            "❌ Reminder system is not configured properly. Please contact an administrator."
-        )
-        return
-
-    try:
-        reminder_channel_id = int(reminder_channel_id)
-    except ValueError:
-        logger.error(f"Invalid REMINDER_CHANNEL_ID format: {reminder_channel_id}")
-        await ctx.send(
-            "❌ Reminder system is not configured properly. Please contact an administrator."
-        )
-        return
-
-    # Add reminder to database
-    success = db_manager.add_reminder(
-        user_id=ctx.author.id,
-        username=f"{ctx.author.name}#{ctx.author.discriminator}",
-        message=message,
-        reminder_time=reminder_datetime,
-        channel_id=reminder_channel_id,
-    )
-
-    if success:
-        # Format the reminder time for display
-        formatted_time = reminder_datetime.strftime("%d/%m/%Y at %H:%M")
-
-        embed = discord.Embed(
-            title="✅ Reminder Set",
-            description=f"I'll remind you on **{formatted_time}**",
-            color=0x00FF00,
-        )
-        embed.add_field(name="Message:", value=message, inline=False)
-        embed.add_field(
-            name="📍 Reminder Location:",
-            value=f"The reminder will be sent to <#{reminder_channel_id}>",
-            inline=False,
-        )
-
-        await ctx.send(embed=embed)
-        logger.info(
-            f"Successfully set reminder for user {ctx.author.id} at {reminder_datetime}"
-        )
-    else:
-        logger.error(f"Failed to add reminder to database for user {ctx.author.id}")
-        await ctx.send("❌ Failed to set reminder. Please try again later.")
-
-
 @client.tree.command(
     name="help", description="Show help information about bot commands"
 )
@@ -2129,53 +1870,6 @@ async def help_command(interaction: discord.Interaction):
     )
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-@client.command(name="commands")
-async def help_prefix(ctx):
-    """Show help information about bot commands using prefix command."""
-    embed = discord.Embed(
-        title="🤖 JIRA Watcher Bot Commands",
-        description="Monitor your JIRA tickets for changes!\n\n**Both slash (/) and prefix commands are supported!**",
-        color=0x0099FF,
-    )
-
-    commands_info = [
-        ("`ping` or `/ping`", "Check bot latency"),
-        (
-            "`watch <ticket>` or `/watch <ticket>`",
-            "Start watching a JIRA ticket for changes",
-        ),
-        ("`unwatch <ticket>` or `/unwatch <ticket>`", "Stop watching a JIRA ticket"),
-        ("`list` or `/list`", "List all tickets you're currently watching"),
-        ("`stats` or `/stats`", "Show database statistics"),
-        (
-            "`delete <n>` or `/delete <n>`",
-            "Delete the last n messages from the channel",
-        ),
-        (
-            "`remind <date> <message> [time]` or `/remind`",
-            "Set a reminder for a specific date and time",
-        ),
-        ("`commands` or `/help`", "Show this help message"),
-    ]
-
-    for command, description in commands_info:
-        embed.add_field(name=command, value=description, inline=False)
-
-    embed.add_field(
-        name="📢 Notifications",
-        value="You'll receive a DM when watched tickets change (status, summary, description, or assignee).",
-        inline=False,
-    )
-
-    embed.add_field(
-        name="📝 Prefix Command Examples",
-        value="`watch ABC-123`\n`remind today Meeting with team 14:30`\n`delete 5`",
-        inline=False,
-    )
-
-    await ctx.send(embed=embed)
 
 
 def main():
@@ -2218,15 +1912,14 @@ def main():
     # Display configuration information
     run_times = config.get("run_on", ["1000"])
     watch_interval = config.get("watch_interval", 5)
+    should_run_on_interval = config.get("run_status_updater_on_interval", False)
     status_interval = config.get("status_updater_interval", 60)
 
     logger.info(f"Worker scheduled times: {', '.join(run_times)}")
-    logger.info(f"Additional status updates every {status_interval} minutes")
+    if should_run_on_interval:
+        logger.info(f"Additional status updates every {status_interval} minutes")
     logger.info(f"Ticket monitoring every {watch_interval} minutes")
     logger.info("Database backups will be created daily")
-    logger.debug(
-        f"Configuration loaded - run_times: {run_times}, watch_interval: {watch_interval}, status_interval: {status_interval}"
-    )
 
     try:
         logger.info("Starting Discord bot client")

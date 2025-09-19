@@ -54,15 +54,11 @@ class JIRA:
     def get_parent_issue(self, issue):
         """Get the parent issue of a subtask or task."""
         try:
-            # Check if this issue has a parent
-            if hasattr(issue.fields, "parent") and issue.fields.parent:
-                parent_key = issue.fields.parent.key
-                parent_issue = self.client.issue(parent_key)
-                logger.info(f"Found parent issue {parent_key} for {issue.key}")
-                return parent_issue
-            else:
-                logger.debug(f"No parent issue found for {issue.key}")
-                return None
+            parent_key = issue.fields.parent.key
+            parent_issue = self.client.issue(parent_key)
+            logger.info(f"Found parent issue {parent_key} for {issue.key}")
+            return parent_issue
+
         except Exception as e:
             logger.error(f"Failed to get parent issue for {issue.key}: {e}")
             return None
@@ -127,6 +123,10 @@ class JIRA:
                 f"Error in async parent status update for {child_issue.key}: {e}"
             )
             return False
+
+    def get_issue(self, ticket):
+        """Get a specific ticket"""
+        return self.client.issue(ticket)
 
     def get_all_open_issues(self) -> List:
         """Get all open issues assigned to the current user."""
@@ -279,7 +279,7 @@ ORDER BY "end date[date]" ASC, priority DESC
             transition_workflow = [
                 {
                     "from_status": "Handshake Done",
-                    "transition": "Start Progress",
+                    "transition": "Start progress",
                     "to_status": "In Progress",
                 },
                 {
